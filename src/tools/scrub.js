@@ -1,25 +1,39 @@
 import { h, setKids, readBytes, saveBlob } from '../ui/dom.js'
-import { Btn, Card, DropZone, ErrorText } from '../ui/widgets.js'
-import { scrubPdf } from '../pdf/ops.js'
+import { Btn, Card, DropZone, ErrorText, MetaTable } from '../ui/widgets.js'
+import { readMetadata, scrubPdf } from '../pdf/ops.js'
 
 export function Scrub() {
   let file = null
   let bytes = null
+  let meta = null // {fields, xmp, id}
   let busy = false
   let error = ''
+  let loadGen = 0
   const root = h('div', { class: 'tool' })
 
   const load = async ([f]) => {
+    const my = ++loadGen
     error = ''
+    file = f
+    meta = null
+    busy = true
+    render()
     try {
-      file = f
-      bytes = await readBytes(f)
+      const b = await readBytes(f)
+      if (my !== loadGen) return
+      const found = await readMetadata(b)
+      if (my !== loadGen) return
+      bytes = b
+      meta = found
     } catch (e) {
-      error = 'could not read that file'
+      if (my !== loadGen) return
+      error = e.message || 'could not read that file'
       file = null
       bytes = null
+    } finally {
+      if (my === loadGen) busy = false
+      render()
     }
-    render()
   }
 
   const run = async () => {
@@ -38,16 +52,23 @@ export function Scrub() {
   }
 
   function render() {
-    setKids(root, 
+    const leaking = meta && (meta.fields.length || meta.xmp || meta.id)
+    setKids(root,
       DropZone({ accept: 'application/pdf', onFiles: load }),
-      file
+      busy ? h('p', { class: 'meta dim' }, 'Reading metadata…') : null,
+      file && meta
         ? Card(
             h('p', { class: 'meta' }, h('b', {}, file.name)),
-            h('p', { class: 'meta dim' }, 'Rebuilds the document and drops /Info, XMP metadata, document IDs, author/producer fields and dead objects. Pages and content are untouched.'),
+            leaking
+              ? h('p', { class: 'meta dim' }, 'This file is carrying the following — all of it gets wiped:')
+              : null,
+            MetaTable(meta),
           )
         : null,
       ErrorText(error),
-      Btn(busy ? 'Scrubbing…' : 'Scrub metadata', { onclick: run, disabled: busy || !bytes }),
+      file && meta
+        ? Btn(busy ? 'Scrubbing…' : leaking ? 'Scrub it all' : 'Rebuild anyway', { onclick: run, disabled: busy })
+        : null,
     )
   }
   render()

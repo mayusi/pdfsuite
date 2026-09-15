@@ -1,5 +1,5 @@
 import { h, setKids, readBytes, saveBlob } from '../ui/dom.js'
-import { Btn, DropZone, ErrorText, PageGrid } from '../ui/widgets.js'
+import { Btn, DropZone, ErrorText, PageGrid, Toolbar } from '../ui/widgets.js'
 import { get } from '../pdf/types.js'
 import { parsePdf } from '../pdf/parse.js'
 import { pageLeaves, organizePages } from '../pdf/ops.js'
@@ -10,16 +10,21 @@ export function Organize() {
   let items = [] // {page, w, h, rotation, deleted}
   let busy = false
   let error = ''
+  let loadGen = 0
   const root = h('div', { class: 'tool' })
 
   const load = async ([f]) => {
+    const my = ++loadGen
     error = ''
+    file = f
     items = []
     render()
     try {
-      file = f
-      bytes = await readBytes(f)
-      const doc = await parsePdf(bytes)
+      const b = await readBytes(f)
+      if (my !== loadGen) return
+      const doc = await parsePdf(b)
+      if (my !== loadGen) return
+      bytes = b
       items = pageLeaves(doc).map((leaf, i) => {
         const mb = get(leaf.dict, 'MediaBox') ?? leaf.inh.MediaBox ?? [0, 0, 0, 0]
         return {
@@ -31,6 +36,7 @@ export function Organize() {
         }
       })
     } catch (e) {
+      if (my !== loadGen) return
       error = e.message || 'could not read that PDF'
       file = null
       bytes = null
@@ -60,10 +66,19 @@ export function Organize() {
 
   function render() {
     const kept = items.filter((i) => !i.deleted).length
-    setKids(root, 
+    const deleted = items.length - kept
+    setKids(root,
       DropZone({ accept: 'application/pdf', onFiles: load }),
       items.length
         ? h('p', { class: 'meta dim' }, `Drag to reorder · rotate / delete on hover · ${kept} of ${items.length} pages kept`)
+        : null,
+      items.length
+        ? Toolbar([
+            ['Rotate all +90°', () => { items = items.map((x) => ({ ...x, rotation: (x.rotation + 90) % 360 })); render() }],
+            ['Reverse order', () => { items = [...items].reverse(); render() }],
+            ['Restore deleted', () => { items = items.map((x) => ({ ...x, deleted: false })); render() }, !deleted],
+            ['Reset all', () => { items = items.map((x) => ({ ...x, rotation: 0, deleted: false })); items.sort((a, b) => a.page - b.page); render() }],
+          ])
         : null,
       items.length
         ? PageGrid({
@@ -75,8 +90,8 @@ export function Organize() {
               items = c
               render()
             },
-            onRotate: (i) => {
-              items = items.map((x, j) => (j === i ? { ...x, rotation: (x.rotation + 90) % 360 } : x))
+            onRotate: (i, delta) => {
+              items = items.map((x, j) => (j === i ? { ...x, rotation: ((x.rotation + delta) % 360 + 360) % 360 } : x))
               render()
             },
             onToggleDelete: (i) => {

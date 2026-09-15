@@ -109,19 +109,75 @@ main h1 { font-size: 24px; margin-top: 14px; }
 .btn:disabled { opacity: 0.4; cursor: default; }
 .error { color: var(--danger); font-size: 14px; margin: 0; }
 
-/* page grid (organize) */
-.pgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
+/* page grids (organize + split picker) — cards proportioned to real MediaBox */
+.pgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 10px; }
 .pcard {
+  position: relative; display: flex; flex-direction: column;
   border: 1px solid var(--border); border-radius: 10px; background: var(--card);
-  padding: 14px 10px 8px; text-align: center; cursor: grab; transition: all 0.12s; user-select: none;
+  padding: 8px; text-align: center; cursor: grab; transition: all 0.12s; user-select: none;
+  max-height: 220px;
 }
+.pbody { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 0; }
 .pcard.target { border-color: var(--accent); transform: scale(1.03); }
 .pcard.deleted { opacity: 0.35; }
 .pnum { font-size: 15px; font-weight: 600; }
 .pdim { font-size: 11px; color: var(--faint); margin-top: 2px; }
 .prot { font-size: 11px; color: var(--accent); margin-top: 2px; }
-.pops { display: flex; justify-content: center; gap: 4px; margin-top: 8px; opacity: 0; transition: opacity 0.15s; }
-.pcard:hover .pops { opacity: 1; }
+.pops { display: flex; justify-content: center; gap: 4px; margin-top: 6px; opacity: 0; transition: opacity 0.15s; }
+.pcard:hover .pops, .pcard.deleted .pops { opacity: 1; }
+
+/* selectable cards (split) */
+.pcard.pick { cursor: pointer; }
+.pcard.pick:hover { border-color: var(--faint); }
+.pcard.sel { border-color: var(--accent); background: rgba(52, 211, 153, 0.07); }
+.pchk {
+  position: absolute; top: 6px; right: 6px; width: 20px; height: 20px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--border); color: transparent; background: var(--bg);
+}
+.pcard.sel .pchk { background: var(--accent); border-color: var(--accent); color: #052e22; }
+
+/* toolbar */
+.toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.tbtn {
+  padding: 5px 11px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg);
+  color: var(--dim); font-size: 12px; cursor: pointer;
+}
+.tbtn:hover { color: var(--text); border-color: var(--faint); }
+.tbtn:disabled { opacity: 0.35; cursor: default; }
+
+/* file list extras */
+.filelist li { cursor: grab; }
+.filelist li.target { background: rgba(52, 211, 153, 0.08); border-radius: 6px; }
+.fmeta { color: var(--faint); font-size: 11px; margin-left: 8px; }
+.ferr { color: var(--danger); font-size: 12px; }
+.filelist.thumbs li { gap: 12px; }
+.thumb { width: 34px; height: 34px; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); }
+
+/* extracted image grid */
+.igrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+.icard { border: 1px solid var(--border); border-radius: 10px; background: var(--card); padding: 8px; position: relative; }
+.icard img { width: 100%; max-height: 140px; object-fit: contain; border-radius: 6px; background: repeating-conic-gradient(#1a1a1e 0% 25%, #131316 0% 50%) 0 0 / 16px 16px; }
+.imeta { display: flex; flex-direction: column; margin-top: 6px; }
+.iname { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.idim { font-size: 11px; color: var(--faint); }
+.isave {
+  position: absolute; top: 12px; right: 12px; border: 1px solid var(--border); border-radius: 8px;
+  background: rgba(9, 9, 11, 0.85); color: var(--dim); padding: 5px; cursor: pointer; opacity: 0; transition: opacity 0.15s;
+}
+.icard:hover .isave { opacity: 1; }
+.isave:hover { color: var(--accent); border-color: var(--accent); }
+
+/* metadata table (scrub) */
+.mtable { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 13px; }
+.mtable td { padding: 5px 8px; border-top: 1px solid var(--border); vertical-align: top; }
+.mtable tr:first-child td { border-top: 0; }
+.mkey { color: var(--faint); width: 130px; font-family: ui-monospace, monospace; font-size: 12px; }
+.mval { color: var(--danger); word-break: break-all; }
+
+/* option rows (pagenum) */
+.optrow { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin: 10px 0; }
+.textin.sel, .textin.num { margin-bottom: 0; }
 
 /* footer */
 footer { margin-top: auto; padding-top: 60px; }
@@ -779,6 +835,50 @@ async function pageCount(bytes) {
   return pageLeaves(await parsePdf(bytes)).length
 }
 
+/** Per-page geometry for UI pickers: [{w, h, rotate}] — MediaBox + inherited Rotate. */
+function pageDims(doc) {
+  return pageLeaves(doc).map((leaf) => {
+    let mb = get(leaf.dict, 'MediaBox') ?? leaf.inh.MediaBox
+    if (isRef(mb)) mb = deref(doc, mb)
+    if (!Array.isArray(mb)) mb = [0, 0, 612, 792]
+    const rot = get(leaf.dict, 'Rotate') ?? leaf.inh.Rotate ?? 0
+    return { w: Math.round(mb[2] - mb[0]), h: Math.round(mb[3] - mb[1]), rotate: typeof rot === 'number' ? rot : 0 }
+  })
+}
+
+const textVal = (v) => {
+  if (isStr(v) || isHex(v)) {
+    const b = v.bytes
+    if (b[0] === 0xfe && b[1] === 0xff) return new TextDecoder('utf-16be').decode(b.subarray(2))
+    return dec(b).replace(/\x00+$/, '')
+  }
+  if (isName(v)) return '/' + v.v
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v)
+  return null
+}
+
+/**
+ * What the file says about you: /Info fields, XMP presence, doc ID presence.
+ * Drives the Scrub tool's "here's what's leaking" preview.
+ */
+async function readMetadata(bytes) {
+  const doc = await parsePdf(bytes)
+  const out = { fields: [], xmp: false, id: false }
+  const infoRaw = get(doc.trailer, 'Info')
+  const info = isRef(infoRaw) ? deref(doc, infoRaw) : infoRaw
+  if (info instanceof Map) {
+    for (const [k, v] of info) {
+      const s = textVal(isRef(v) ? deref(doc, v) : v)
+      if (s) out.fields.push({ key: k, value: s })
+    }
+  }
+  const root = deref(doc, get(doc.trailer, 'Root'))
+  const catalog = isStream(root) ? root.dict : root
+  if (get(catalog, 'Metadata') !== undefined) out.xmp = true
+  if (get(doc.trailer, 'ID') !== undefined) out.id = true
+  return out
+}
+
 /** Deep-copy a value across docs, remapping refs. */
 function copyValue(v, src, dst, refMap) {
   if (isRef(v)) {
@@ -805,8 +905,9 @@ function copyValue(v, src, dst, refMap) {
 /**
  * Append selected pages of `srcDoc` into `dst` under `pagesRef`.
  * `picks` = [{leaf, rotateDelta}] — leaves already walked (source order preserved by caller).
+ * `strip` names extra page-dict keys to drop (privacy scrubbing).
  */
-function appendPages(srcDoc, picks, dst, pagesRef, kids) {
+function appendPages(srcDoc, picks, dst, pagesRef, kids, strip = []) {
   const refMap = new Map()
   for (const { leaf, rotateDelta } of picks) {
     const num = dst.alloc()
@@ -817,7 +918,7 @@ function appendPages(srcDoc, picks, dst, pagesRef, kids) {
       if (v !== undefined) pageDict.set(k, copyValue(v, srcDoc, dst, refMap))
     }
     for (const [k, val] of leaf.dict) {
-      if (k === 'Parent' || k === 'Metadata' || INHERITED.includes(k)) continue
+      if (k === 'Parent' || k === 'Metadata' || INHERITED.includes(k) || strip.includes(k)) continue
       pageDict.set(k, copyValue(val, srcDoc, dst, refMap))
     }
     pageDict.set('Type', name('Page'))
@@ -968,15 +1069,27 @@ function imagesToPdf(images) {
 const pdfStr = (s) => '(' + s.replace(/[\\()]/g, (c) => '\\' + c) + ')'
 
 /**
- * Stamp "N / total" centered at the bottom of every page.
+ * Stamp a label on every page.
+ * opts: pos 'tl'|'tc'|'tr'|'bl'|'bc'|'br' (default 'bc'),
+ *       fmt 'n'|'n-of-total'|'page-n' (default 'n-of-total'),
+ *       start (number shown on first stamped page, default 1),
+ *       skipFirst (don't stamp page 1), size (pt, default 10), margin (pt, default 18).
  * Appends a content stream ON TOP of existing content and injects a
  * Helvetica base-14 font under an unlikely-colliding resource name.
  */
-async function addPageNumbers(bytes) {
+async function addPageNumbers(bytes, opts = {}) {
+  const { pos = 'bc', fmt = 'n-of-total', start = 1, skipFirst = false, size = 10, margin = 18 } = opts
   const src = await parsePdf(bytes)
   const leaves = pageLeaves(src)
   const total = leaves.length
   const fontResName = 'PDFFnt1'
+
+  const labelFor = (i) => {
+    const n = i + start
+    if (fmt === 'n') return String(n)
+    if (fmt === 'page-n') return `Page ${n}`
+    return `${n} / ${total}`
+  }
 
   const dst = newDoc()
   const pagesRef = dst.alloc()
@@ -999,15 +1112,39 @@ async function addPageNumbers(bytes) {
     pageDict.set('Type', name('Page'))
     pageDict.set('Parent', ref(pagesRef, 0))
 
-    // label stream: "i+1 / total" centered on the MediaBox width
-    const mb = pageDict.get('MediaBox') ?? [0, 0, 612, 792]
+    if (i === 0 && skipFirst) {
+      dst.set(num, pageDict)
+      continue
+    }
+
+    // label position is chosen in DISPLAY space (what the user sees), then
+    // mapped back into the page's user space honouring /Rotate.
+    const mbSrc = get(leaf.dict, 'MediaBox') ?? leaf.inh.MediaBox
+    const mbResolved = isRef(mbSrc) ? deref(src, mbSrc) : mbSrc
+    const mb = Array.isArray(mbResolved) ? mbResolved : [0, 0, 612, 792]
+    const rotSrc = get(leaf.dict, 'Rotate') ?? leaf.inh.Rotate ?? 0
+    const rot = typeof rotSrc === 'number' ? ((rotSrc % 360) + 360) % 360 : 0
     const w = mb[2] - mb[0]
-    const label = `${i + 1} / ${total}`
-    const x = mb[0] + w / 2 - label.length * 2.5 // ~5pt/char at 10pt Helvetica
-    const y = mb[1] + 18
+    const hh = mb[3] - mb[1]
+    const dw = rot % 180 === 0 ? w : hh
+    const dh = rot % 180 === 0 ? hh : w
+    const label = labelFor(i)
+    const charW = size * 0.5 // ~half-em advance for Helvetica digits
+    const xd = pos.endsWith('l') ? margin
+      : pos.endsWith('r') ? dw - margin - label.length * charW
+      : dw / 2 - (label.length * charW) / 2
+    const yd = pos.startsWith('t') ? dh - margin - size * 0.72 : margin
+    // display (xd,yd) → user (xu,yu) for each quarter-turn, then counter-rotate
+    // the text matrix so the label reads upright on the displayed page.
+    const [xu, yu, m] =
+      rot === 90 ? [w - yd, xd, [0, 1, -1, 0]]
+      : rot === 180 ? [w - xd, hh - yd, [-1, 0, 0, -1]]
+      : rot === 270 ? [yd, hh - xd, [0, -1, 1, 0]]
+      : [xd, yd, [1, 0, 0, 1]]
     const csNum = dst.alloc()
     dst.set(csNum, stream(new Map(), new TextEncoder().encode(
-      `BT /${fontResName} 10 Tf 0 g ${x.toFixed(1)} ${y.toFixed(1)} Td ${pdfStr(label)} Tj ET`,
+      `q ${m[0]} ${m[1]} ${m[2]} ${m[3]} ${(mb[0] + xu).toFixed(1)} ${(mb[1] + yu).toFixed(1)} cm ` +
+      `BT /${fontResName} ${size} Tf 0 g 0 0 Td ${pdfStr(label)} Tj ET Q`,
     )))
 
     // contents = existing contents + ours last (draws on top)
@@ -1016,12 +1153,13 @@ async function addPageNumbers(bytes) {
     arr.push(ref(csNum, 0))
     pageDict.set('Contents', arr.length === 1 ? arr[0] : arr)
 
-    // resources: copy inherited, add our font if slot free
+    // resources: pageDict already holds dst-space copies/refs — resolve any
+    // indirect /Resources or /Font against dst.objects, never against src.
     let res = pageDict.get('Resources')
-    if (isRef(res)) res = deref(src, res) instanceof Map ? copyValue(deref(src, res), src, dst, refMap) : undefined
+    if (isRef(res)) res = dst.objects.get(res.n)
     if (!(res instanceof Map)) res = new Map()
     let fonts = res.get('Font')
-    if (isRef(fonts)) fonts = copyValue(deref(src, fonts), src, dst, refMap)
+    if (isRef(fonts)) fonts = dst.objects.get(fonts.n)
     if (!(fonts instanceof Map)) fonts = new Map()
     if (!fonts.has(fontResName)) {
       fonts.set(fontResName, new Map([
@@ -1037,14 +1175,20 @@ async function addPageNumbers(bytes) {
   return finishDoc(dst, pagesRef, kids)
 }
 
-/** Rebuild dropping /Info, XMP /Metadata, doc IDs — tracker scrub. */
+/**
+ * Rebuild dropping /Info, XMP /Metadata, doc IDs, per-page annotations (author
+ * names, comments, popup threads) and /PieceInfo — tracker scrub.
+ */
 async function scrubPdf(bytes) {
   const src = await parsePdf(bytes)
   const leaves = pageLeaves(src)
   const dst = newDoc()
   const pagesRef = dst.alloc()
   const kids = []
-  appendPages(src, leaves.map((leaf) => ({ leaf, rotateDelta: 0 })), dst, pagesRef, kids)
+  appendPages(src, leaves.map((leaf) => ({ leaf, rotateDelta: 0 })), dst, pagesRef, kids, [
+    'Annots',
+    'PieceInfo',
+  ])
   return finishDoc(dst, pagesRef, kids)
 }
 
@@ -1110,33 +1254,43 @@ async function extractImages(bytes) {
     i++
     const w = get(v.dict, 'Width') ?? 0
     const h = get(v.dict, 'Height') ?? 0
-    let filter = get(v.dict, 'Filter')
-    if (Array.isArray(filter)) filter = filter[filter.length - 1]
-    const f = isName(filter) ? filter.v : null
+    const filterVal = get(v.dict, 'Filter')
+    const chain = (Array.isArray(filterVal) ? filterVal : filterVal === undefined ? [] : [filterVal]).map(
+      (fl) => (isName(fl) ? fl.v : null),
+    )
     const stem = `image-${i}-${w}x${h}`
+    const codec = { DCTDecode: ['.jpg', 'image/jpeg'], DCT: ['.jpg', 'image/jpeg'], JPXDecode: ['.jp2', 'image/jp2'], JPX: ['.jp2', 'image/jp2'] }
     try {
-      if (f === 'DCTDecode') {
-        images.push({ name: `${stem}.jpg`, data: v.data, w, h })
-      } else if (f === 'JPXDecode') {
-        images.push({ name: `${stem}.jp2`, data: v.data, w, h })
-      } else if (f === 'FlateDecode' || f === null || f === 'Fl') {
+      const last = chain.length ? chain[chain.length - 1] : null
+      const out = last ? codec[last] : undefined
+      // Every filter except a trailing image codec is a compression layer to
+      // unwrap in listed order (e.g. [/FlateDecode /DCTDecode] = flate(jpeg)).
+      const decodeChain = out ? chain.slice(0, -1) : chain
+      let data = v.data
+      for (const fl of decodeChain) {
+        if (fl === 'FlateDecode' || fl === 'Fl') data = await inflate(data)
+        else throw new Error(`unsupported filter ${fl}`)
+      }
+      if (out) {
+        images.push({ name: `${stem}${out[0]}`, data, w, h, mime: out[1] })
+      } else if (decodeChain.every((fl) => fl === 'FlateDecode' || fl === 'Fl' || fl === null)) {
         const bpc = get(v.dict, 'BitsPerComponent') ?? 8
         let cs = get(v.dict, 'ColorSpace')
         if (isRef(cs)) cs = deref(doc, cs)
         const csName = isName(cs) ? cs.v : Array.isArray(cs) && isName(cs[0]) ? cs[0].v : null
         if (bpc !== 8 || (csName !== 'DeviceRGB' && csName !== 'DeviceGray')) { skipped++; continue }
         const colors = csName === 'DeviceRGB' ? 3 : 1
-        let raw = f === null ? v.data : await inflate(v.data)
-        const dp = get(v.dict, 'DecodeParms') ?? get(v.dict, 'DP')
+        let dp = get(v.dict, 'DecodeParms') ?? get(v.dict, 'DP')
+        if (Array.isArray(dp)) dp = [...dp].reverse().find((x) => x instanceof Map)
         const parms = dp instanceof Map ? {
           predictor: get(dp, 'Predictor') ?? 1,
           columns: get(dp, 'Columns') ?? w,
           colors: get(dp, 'Colors') ?? colors,
           bpc: get(dp, 'BitsPerComponent') ?? 8,
         } : { predictor: 1, columns: w, colors, bpc: 8 }
-        raw = unPredict(raw, parms)
+        const raw = unPredict(data, parms)
         if (raw.length !== w * h * colors) { skipped++; continue }
-        images.push({ name: `${stem}.png`, data: pngEncode(w, h, raw, colors === 1), w, h })
+        images.push({ name: `${stem}.png`, data: pngEncode(w, h, raw, colors === 1), w, h, mime: 'image/png' })
       } else {
         skipped++
       }
@@ -1176,6 +1330,8 @@ const ICONS = {
   download: 'M12 4v12m0 0 4-4m-4 4-4-4M4 20h16',
   x: 'M6 6l12 12M18 6 6 18',
   rotate: 'M20 8A8 8 0 1 0 20 15M20 4v4h-4',
+  rotl: 'M4 8A8 8 0 1 1 4 15M4 4v4h4',
+  check: 'M4 12l5 5L20 6',
   undo: 'M8 6 4 10l4 4M4 10h10a6 6 0 0 1 0 12h-2',
   up: 'M12 19V5m0 0-5 5m5-5 5 5',
   down: 'M12 5v14m0 0 5-5m-5 5-5-5',
@@ -1283,24 +1439,48 @@ function DropZone({ accept, multiple = false, onFiles, label }) {
   return zone
 }
 
-/** Ordered file list with move-up/down + remove. Merge / Images→PDF. */
+/**
+ * Ordered file list — drag-to-reorder + move-up/down + remove.
+ * Each item may carry .meta (extra info line, e.g. page count) and .err.
+ */
 function FileList({ files, onMove, onRemove }) {
-  return h(
-    'ul',
-    { class: 'filelist' },
-    files.map((f, i) =>
-      h(
-        'li',
-        {},
-        h('span', { class: 'idx' }, String(i + 1)),
-        h('span', { class: 'fname' }, f.name),
-        h('span', { class: 'fsize' }, fmtBytes(f.size)),
-        iconBtn('up', 'Move up', () => onMove(i, i - 1), i === 0),
-        iconBtn('down', 'Move down', () => onMove(i, i + 1), i === files.length - 1),
-        iconBtn('x', 'Remove', () => onRemove(i)),
-      ),
-    ),
-  )
+  let dragIdx = null
+  const list = h('ul', { class: 'filelist' })
+  files.forEach((f, i) => {
+    const li = h(
+      'li',
+      {
+        draggable: 'true',
+        ondragstart: (e) => {
+          dragIdx = i
+          e.dataTransfer.effectAllowed = 'move'
+          e.dataTransfer.setData('text/plain', '') // required for drag to fire
+        },
+        ondragend: () => {
+          dragIdx = null
+          list.querySelectorAll('li').forEach((x) => x.classList.remove('target'))
+        },
+        ondragover: (e) => {
+          e.preventDefault()
+          li.classList.add('target')
+        },
+        ondragleave: () => li.classList.remove('target'),
+        ondrop: (e) => {
+          e.preventDefault()
+          li.classList.remove('target')
+          if (dragIdx !== null && dragIdx !== i) onMove(dragIdx, i)
+        },
+      },
+      h('span', { class: 'idx' }, String(i + 1)),
+      h('span', { class: 'fname' }, f.name, f.meta ? h('span', { class: 'fmeta' }, f.meta) : null),
+      f.err ? h('span', { class: 'ferr' }, f.err) : h('span', { class: 'fsize' }, fmtBytes(f.size)),
+      iconBtn('up', 'Move up', () => onMove(i, i - 1), i === 0),
+      iconBtn('down', 'Move down', () => onMove(i, i + 1), i === files.length - 1),
+      iconBtn('x', 'Remove', () => onRemove(i)),
+    )
+    list.append(li)
+  })
+  return list
 }
 
 function iconBtn(iconName, title, onclick, disabled = false) {
@@ -1325,8 +1505,9 @@ function ErrorText(msg) {
 }
 
 /**
- * Page-card grid for Organize — drag-reorder, rotate, delete.
- * items: [{page, w, h, rotation, deleted}] — no renderer needed, cards show real metadata.
+ * Page-card grid for Organize — drag-reorder, rotate ±90°, delete/restore.
+ * items: [{page, w, h, rotation, deleted}] — cards are proportionally sized
+ * to the real MediaBox so portrait/landscape/mixed sizes read at a glance.
  */
 function PageGrid({ items, onReorder, onRotate, onToggleDelete }) {
   let dragIdx = null
@@ -1337,8 +1518,13 @@ function PageGrid({ items, onReorder, onRotate, onToggleDelete }) {
       'div',
       {
         class: 'pcard' + (it.deleted ? ' deleted' : ''),
+        style: { aspectRatio: it.w && it.h ? `${it.w} / ${it.h}` : '3 / 4' },
         draggable: 'true',
-        ondragstart: () => (dragIdx = i),
+        ondragstart: (e) => {
+          dragIdx = i
+          e.dataTransfer.effectAllowed = 'move'
+          e.dataTransfer.setData('text/plain', '') // required for drag to fire
+        },
         ondragend: () => {
           dragIdx = null
           grid.querySelectorAll('.pcard').forEach((c) => c.classList.remove('target'))
@@ -1354,13 +1540,16 @@ function PageGrid({ items, onReorder, onRotate, onToggleDelete }) {
           if (dragIdx !== null && dragIdx !== i) onReorder(dragIdx, i)
         },
       },
-      h('div', { class: 'pnum' }, `p${it.page}`),
-      h('div', { class: 'pdim' }, `${it.w}×${it.h}`),
-      it.rotation ? h('div', { class: 'prot' }, `${it.rotation}°`) : null,
+      h('div', { class: 'pbody' },
+        h('div', { class: 'pnum' }, `p${it.page}`),
+        h('div', { class: 'pdim' }, `${it.w}×${it.h}`),
+        it.rotation ? h('div', { class: 'prot' }, `${it.rotation}°`) : null,
+      ),
       h(
         'div',
         { class: 'pops' },
-        iconBtn('rotate', 'Rotate +90°', () => onRotate(i)),
+        iconBtn('rotl', 'Rotate −90°', () => onRotate(i, -90)),
+        iconBtn('rotate', 'Rotate +90°', () => onRotate(i, 90)),
         iconBtn(it.deleted ? 'undo' : 'x', it.deleted ? 'Restore' : 'Delete', () => onToggleDelete(i)),
       ),
     )
@@ -1369,13 +1558,165 @@ function PageGrid({ items, onReorder, onRotate, onToggleDelete }) {
   return grid
 }
 
+/**
+ * Click-to-select page picker for Split — cards proportioned to MediaBox.
+ * Click toggles; shift+click selects the range from the last click.
+ * selected = Set of 1-based page numbers; onToggle(page, shiftKey).
+ */
+function SelectGrid({ items, selected, onToggle }) {
+  return h(
+    'div',
+    { class: 'pgrid sel' },
+    items.map((it) =>
+      h(
+        'div',
+        {
+          class: 'pcard pick' + (selected.has(it.page) ? ' sel' : ''),
+          style: { aspectRatio: it.w && it.h ? `${it.w} / ${it.h}` : '3 / 4' },
+          role: 'checkbox',
+          'aria-checked': selected.has(it.page) ? 'true' : 'false',
+          tabindex: '0',
+          onclick: (e) => onToggle(it.page, e.shiftKey),
+          onkeydown: (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault()
+              onToggle(it.page, e.shiftKey)
+            }
+          },
+        },
+        h('div', { class: 'pbody' },
+          h('div', { class: 'pnum' }, `p${it.page}`),
+          h('div', { class: 'pdim' }, `${it.w}×${it.h}`),
+        ),
+        h('div', { class: 'pchk' }, icon('check', 'icon-sm')),
+      ),
+    ),
+  )
+}
+
+/**
+ * Image file list for Images→PDF — real thumbnails via object URLs.
+ * files: [{file, url}] — caller owns URL.createObjectURL / revoke.
+ */
+function ThumbList({ files, onMove, onRemove }) {
+  let dragIdx = null
+  const list = h('ul', { class: 'filelist thumbs' })
+  files.forEach((f, i) => {
+    const li = h(
+      'li',
+      {
+        draggable: 'true',
+        ondragstart: (e) => {
+          dragIdx = i
+          e.dataTransfer.effectAllowed = 'move'
+          e.dataTransfer.setData('text/plain', '')
+        },
+        ondragend: () => {
+          dragIdx = null
+          list.querySelectorAll('li').forEach((x) => x.classList.remove('target'))
+        },
+        ondragover: (e) => {
+          e.preventDefault()
+          li.classList.add('target')
+        },
+        ondragleave: () => li.classList.remove('target'),
+        ondrop: (e) => {
+          e.preventDefault()
+          li.classList.remove('target')
+          if (dragIdx !== null && dragIdx !== i) onMove(dragIdx, i)
+        },
+      },
+      h('img', { class: 'thumb', src: f.url, alt: '' }),
+      h('span', { class: 'fname' }, f.file.name),
+      h('span', { class: 'fsize' }, f.dims ?? fmtBytes(f.file.size)),
+      iconBtn('up', 'Move up', () => onMove(i, i - 1), i === 0),
+      iconBtn('down', 'Move down', () => onMove(i, i + 1), i === files.length - 1),
+      iconBtn('x', 'Remove', () => onRemove(i)),
+    )
+    list.append(li)
+  })
+  return list
+}
+
+/**
+ * Extracted-image results grid — real previews + per-image download.
+ * images: [{name, data, w, h, mime}]. onSave(image) downloads one.
+ */
+function ImgGrid({ images, onSave }) {
+  return h(
+    'div',
+    { class: 'igrid' },
+    images.map((im) => {
+      const url = URL.createObjectURL(new Blob([im.data], { type: im.mime }))
+      return h(
+        'div',
+        { class: 'icard' },
+        h('img', {
+          src: url,
+          alt: im.name,
+          loading: 'lazy',
+          onload: () => URL.revokeObjectURL(url),
+          onerror: () => URL.revokeObjectURL(url),
+        }),
+        h('div', { class: 'imeta' },
+          h('span', { class: 'iname' }, im.name),
+          h('span', { class: 'idim' }, `${im.w}×${im.h} · ${fmtBytes(im.data.length)}`),
+        ),
+        h('button', { type: 'button', class: 'isave', title: 'Download', onclick: () => onSave(im) }, icon('download', 'icon-sm')),
+      )
+    }),
+  )
+}
+
+/**
+ * Metadata preview table for Scrub — shows exactly what will be wiped.
+ * meta: {fields: [{key, value}], xmp, id}
+ */
+function MetaTable({ fields, xmp, id }) {
+  const rows = fields.map((f) =>
+    h('tr', {}, h('td', { class: 'mkey' }, f.key), h('td', { class: 'mval' }, f.value)),
+  )
+  if (xmp) rows.push(h('tr', {}, h('td', { class: 'mkey' }, 'XMP stream'), h('td', { class: 'mval' }, 'embedded metadata packet')))
+  if (id) rows.push(h('tr', {}, h('td', { class: 'mkey' }, 'Document ID'), h('td', { class: 'mval' }, 'unique fingerprint in trailer')))
+  if (!rows.length) return h('p', { class: 'meta dim' }, 'No metadata found — this file is already clean.')
+  return h('table', { class: 'mtable' }, h('tbody', {}, rows))
+}
+
+/** Small text-button toolbar row (Organize bulk actions). */
+function Toolbar(actions) {
+  return h(
+    'div',
+    { class: 'toolbar' },
+    actions.map(([label, onclick, disabled]) =>
+      h('button', { type: 'button', class: 'tbtn', onclick, disabled: disabled || undefined }, label),
+    ),
+  )
+}
+
 // ---- src/tools/merge.js ----
 
 function Merge() {
-  let files = []
+  let files = [] // {file, bytes, pages, err}
   let busy = false
   let error = ''
   const root = h('div', { class: 'tool' })
+
+  const add = async (incoming) => {
+    for (const f of incoming) {
+      const entry = { name: f.name, size: f.size, file: f, bytes: null, pages: null, meta: 'reading…', err: null }
+      files.push(entry)
+      render()
+      try {
+        const bytes = await readBytes(f)
+        entry.bytes = bytes
+        entry.pages = await pageCount(bytes)
+        entry.meta = `${entry.pages} page${entry.pages === 1 ? '' : 's'}`
+      } catch {
+        entry.err = 'not a readable PDF'
+      }
+      render()
+    }
+  }
 
   const move = (from, to) => {
     const c = [...files]
@@ -1390,11 +1731,12 @@ function Merge() {
     error = ''
     render()
     try {
-      const inputs = await Promise.all(files.map(readBytes))
-      const out = await mergePdfs(inputs)
+      const bad = files.find((f) => !f.bytes)
+      if (bad) throw new Error(`"${bad.file.name}" isn't a readable PDF — remove it`)
+      const out = await mergePdfs(files.map((f) => f.bytes))
       saveBlob(new Blob([out], { type: 'application/pdf' }), 'merged.pdf')
     } catch (e) {
-      error = e.message || 'merge failed — is every file a valid PDF?'
+      error = e.message || 'merge failed'
     } finally {
       busy = false
       render()
@@ -1402,18 +1744,27 @@ function Merge() {
   }
 
   function render() {
-    setKids(root, 
+    const good = files.filter((f) => f.bytes)
+    const total = good.reduce((n, f) => n + (f.pages || 0), 0)
+    setKids(root,
       DropZone({
         accept: 'application/pdf',
         multiple: true,
-        onFiles: (f) => {
-          files = files.concat(f)
-          render()
-        },
+        onFiles: add,
+        label: files.length ? 'Drop more PDFs to add them or ' : undefined,
       }),
-      files.length ? Card(FileList({ files, onMove: move, onRemove: (i) => { files = files.filter((_, j) => j !== i); render() } })) : null,
+      files.length
+        ? Card(
+            FileList({ files, onMove: move, onRemove: (i) => { files = files.filter((_, j) => j !== i); render() } }),
+            h('p', { class: 'meta dim', style: { marginTop: '10px' } },
+              `Drag to reorder · ${good.length} valid · ${total} pages total`),
+          )
+        : null,
       ErrorText(error),
-      Btn(busy ? 'Merging…' : `Merge ${files.length} PDFs`, { onclick: run, disabled: busy || files.length < 2 }),
+      Btn(busy ? 'Merging…' : `Merge ${good.length} PDFs · ${total} pages`, {
+        onclick: run,
+        disabled: busy || good.length < 2 || good.length !== files.length,
+      }),
     )
   }
   render()
@@ -1422,24 +1773,54 @@ function Merge() {
 
 // ---- src/tools/split.js ----
 
+/** Selected set → "1-3, 5" spec string. */
+const selToSpec = (sel) => {
+  const pgs = [...sel].sort((a, b) => a - b)
+  const parts = []
+  for (let i = 0; i < pgs.length; i++) {
+    let j = i
+    while (j + 1 < pgs.length && pgs[j + 1] === pgs[j] + 1) j++
+    parts.push(pgs[i] === pgs[j] ? `${pgs[i]}` : `${pgs[i]}-${pgs[j]}`)
+    i = j
+  }
+  return parts.join(', ')
+}
+
 function Split() {
   let file = null
   let bytes = null
-  let pages = 0
+  let items = [] // {page, w, h}
+  let selected = new Set()
+  let lastPick = null // for shift-click ranges
   let spec = ''
+  let specOK = true
   let mode = 'one'
   let busy = false
   let error = ''
+  let loadGen = 0
   const root = h('div', { class: 'tool' })
 
   const load = async ([f]) => {
+    const my = ++loadGen
     error = ''
+    file = f
+    items = []
+    selected = new Set()
+    lastPick = null
+    spec = ''
+    specOK = true
+    render()
     try {
-      file = f
-      bytes = await readBytes(f)
-      pages = await pageCount(bytes)
-      spec = `1-${pages}`
+      const b = await readBytes(f)
+      if (my !== loadGen) return
+      const doc = await parsePdf(b)
+      if (my !== loadGen) return
+      bytes = b
+      items = pageDims(doc).map((d, i) => ({ page: i + 1, w: d.w, h: d.h }))
+      selected = new Set(items.map((i) => i.page))
+      spec = selToSpec(selected)
     } catch (e) {
+      if (my !== loadGen) return
       error = e.message || 'could not read that PDF'
       file = null
       bytes = null
@@ -1447,12 +1828,58 @@ function Split() {
     render()
   }
 
+  const toggle = (page, shift) => {
+    if (shift && lastPick !== null) {
+      const [a, b] = lastPick < page ? [lastPick, page] : [page, lastPick]
+      for (let p = a; p <= b; p++) selected.add(p)
+    } else {
+      selected.has(page) ? selected.delete(page) : selected.add(page)
+    }
+    lastPick = page
+    spec = selToSpec(selected)
+    specOK = true
+    render()
+  }
+
+  const preset = (kind) => {
+    selected = new Set(
+      kind === 'all' ? items.map((i) => i.page)
+      : kind === 'none' ? []
+      : items.filter((i) => (kind === 'odd') === (i.page % 2 === 1)).map((i) => i.page),
+    )
+    lastPick = null
+    spec = selToSpec(selected)
+    specOK = true
+    render()
+  }
+
+  let gridEl = null
+  let btnEl = null
+
+  const onSpec = (v) => {
+    spec = v
+    try {
+      selected = new Set(parseRanges(v, items.length).flatMap(({ from, to }) =>
+        Array.from({ length: to - from + 1 }, (_, i) => from + i)))
+      specOK = true
+    } catch {
+      specOK = false // leave cards as-is until the spec parses
+    }
+    if (btnEl) btnEl.disabled = busy || !specOK || !selected.size
+    // hot-swap only the grid — full render() would nuke input focus mid-typing
+    if (specOK && gridEl) {
+      const fresh = SelectGrid({ items, selected, onToggle: toggle })
+      gridEl.replaceWith(fresh)
+      gridEl = fresh
+    }
+  }
+
   const run = async () => {
     busy = true
     error = ''
     render()
     try {
-      const ranges = parseRanges(spec, pages)
+      const ranges = parseRanges(spec, items.length)
       const stem = file.name.replace(/\.pdf$/i, '')
       if (mode === 'one') {
         const out = await extractPages(bytes, ranges)
@@ -1475,31 +1902,6 @@ function Split() {
     }
   }
 
-  function render() {
-    setKids(root, 
-      DropZone({ accept: 'application/pdf', onFiles: load }),
-      file
-        ? Card(
-            h('p', { class: 'meta' }, h('b', {}, file.name), ` — ${pages} pages`),
-            h('label', { class: 'lbl' }, 'Pages / ranges (e.g. 1-3, 5, 8-10)'),
-            h('input', {
-              class: 'textin',
-              value: spec,
-              oninput: (e) => (spec = e.target.value),
-            }),
-            h(
-              'div',
-              { class: 'radio-row' },
-              radio('one', 'One PDF with those pages'),
-              radio('zip', 'Separate PDF per range (zip)'),
-            ),
-          )
-        : null,
-      ErrorText(error),
-      Btn(busy ? 'Working…' : 'Split', { onclick: run, disabled: busy || !bytes }),
-    )
-  }
-
   const radio = (val, text) =>
     h(
       'label',
@@ -1513,6 +1915,47 @@ function Split() {
       text,
     )
 
+  function render() {
+    setKids(root,
+      DropZone({ accept: 'application/pdf', onFiles: load }),
+      file
+        ? Card(
+            h('p', { class: 'meta' }, h('b', {}, file.name), ` — ${items.length} pages`),
+            h('p', { class: 'meta dim' }, 'Click pages to pick them · shift-click selects a range'),
+            Toolbar([
+              ['All', () => preset('all')],
+              ['None', () => preset('none')],
+              ['Odd pages', () => preset('odd')],
+              ['Even pages', () => preset('even')],
+            ]),
+          )
+        : null,
+      items.length ? (gridEl = SelectGrid({ items, selected, onToggle: toggle })) : null,
+      file
+        ? Card(
+            h('label', { class: 'lbl' }, 'Ranges (synced with your picks — edit either)'),
+            h('input', {
+              class: 'textin',
+              value: spec,
+              oninput: (e) => onSpec(e.target.value),
+            }),
+            h(
+              'div',
+              { class: 'radio-row' },
+              radio('one', 'One PDF with those pages'),
+              radio('zip', 'Separate PDF per range (zip)'),
+            ),
+          )
+        : null,
+      ErrorText(error),
+      file
+        ? (btnEl = Btn(
+            busy ? 'Working…' : `Extract ${selected.size} page${selected.size === 1 ? '' : 's'}`,
+            { onclick: run, disabled: busy || !specOK || !selected.size },
+          ))
+        : (btnEl = null),
+    )
+  }
   render()
   return root
 }
@@ -1525,16 +1968,21 @@ function Organize() {
   let items = [] // {page, w, h, rotation, deleted}
   let busy = false
   let error = ''
+  let loadGen = 0
   const root = h('div', { class: 'tool' })
 
   const load = async ([f]) => {
+    const my = ++loadGen
     error = ''
+    file = f
     items = []
     render()
     try {
-      file = f
-      bytes = await readBytes(f)
-      const doc = await parsePdf(bytes)
+      const b = await readBytes(f)
+      if (my !== loadGen) return
+      const doc = await parsePdf(b)
+      if (my !== loadGen) return
+      bytes = b
       items = pageLeaves(doc).map((leaf, i) => {
         const mb = get(leaf.dict, 'MediaBox') ?? leaf.inh.MediaBox ?? [0, 0, 0, 0]
         return {
@@ -1546,6 +1994,7 @@ function Organize() {
         }
       })
     } catch (e) {
+      if (my !== loadGen) return
       error = e.message || 'could not read that PDF'
       file = null
       bytes = null
@@ -1575,10 +2024,19 @@ function Organize() {
 
   function render() {
     const kept = items.filter((i) => !i.deleted).length
-    setKids(root, 
+    const deleted = items.length - kept
+    setKids(root,
       DropZone({ accept: 'application/pdf', onFiles: load }),
       items.length
         ? h('p', { class: 'meta dim' }, `Drag to reorder · rotate / delete on hover · ${kept} of ${items.length} pages kept`)
+        : null,
+      items.length
+        ? Toolbar([
+            ['Rotate all +90°', () => { items = items.map((x) => ({ ...x, rotation: (x.rotation + 90) % 360 })); render() }],
+            ['Reverse order', () => { items = [...items].reverse(); render() }],
+            ['Restore deleted', () => { items = items.map((x) => ({ ...x, deleted: false })); render() }, !deleted],
+            ['Reset all', () => { items = items.map((x) => ({ ...x, rotation: 0, deleted: false })); items.sort((a, b) => a.page - b.page); render() }],
+          ])
         : null,
       items.length
         ? PageGrid({
@@ -1590,8 +2048,8 @@ function Organize() {
               items = c
               render()
             },
-            onRotate: (i) => {
-              items = items.map((x, j) => (j === i ? { ...x, rotation: (x.rotation + 90) % 360 } : x))
+            onRotate: (i, delta) => {
+              items = items.map((x, j) => (j === i ? { ...x, rotation: ((x.rotation + delta) % 360 + 360) % 360 } : x))
               render()
             },
             onToggleDelete: (i) => {
@@ -1627,10 +2085,30 @@ async function toJpeg(file) {
 }
 
 function ImgToPdf() {
-  let files = []
+  let files = [] // {file, url, dims}
   let busy = false
   let error = ''
   const root = h('div', { class: 'tool' })
+
+  const add = async (incoming) => {
+    for (const f of incoming) {
+      const entry = { file: f, url: URL.createObjectURL(f), dims: null }
+      files.push(entry)
+      render()
+      try {
+        const bmp = await createImageBitmap(f)
+        entry.dims = `${bmp.width}×${bmp.height}`
+        bmp.close()
+      } catch { /* non-decodable → toJpeg will surface it on build */ }
+      render()
+    }
+  }
+
+  const remove = (i) => {
+    URL.revokeObjectURL(files[i].url)
+    files = files.filter((_, j) => j !== i)
+    render()
+  }
 
   const move = (from, to) => {
     const c = [...files]
@@ -1645,7 +2123,7 @@ function ImgToPdf() {
     error = ''
     render()
     try {
-      const images = await Promise.all(files.map(async (f) => ({ data: await toJpeg(f) })))
+      const images = await Promise.all(files.map(async (f) => ({ data: await toJpeg(f.file) })))
       const out = imagesToPdf(images)
       saveBlob(new Blob([out], { type: 'application/pdf' }), 'images.pdf')
     } catch (e) {
@@ -1657,14 +2135,19 @@ function ImgToPdf() {
   }
 
   function render() {
-    setKids(root, 
+    setKids(root,
       DropZone({
         accept: 'image/jpeg,image/png,image/webp,image/gif,image/bmp',
         multiple: true,
-        onFiles: (f) => { files = files.concat(f); render() },
+        onFiles: add,
         label: 'Drop images here or ',
       }),
-      files.length ? Card(FileList({ files, onMove: move, onRemove: (i) => { files = files.filter((_, j) => j !== i); render() } })) : null,
+      files.length
+        ? Card(
+            ThumbList({ files, onMove: move, onRemove: remove }),
+            h('p', { class: 'meta dim', style: { marginTop: '10px' } }, 'Drag to reorder — each image becomes one page at native size'),
+          )
+        : null,
       ErrorText(error),
       Btn(busy ? 'Building…' : `Build PDF from ${files.length} image${files.length === 1 ? '' : 's'}`, {
         onclick: run,
@@ -1680,57 +2163,60 @@ function ImgToPdf() {
 
 function ExtractImgs() {
   let file = null
-  let bytes = null
+  let results = null // {images, skipped}
   let busy = false
   let error = ''
+  let loadGen = 0
   const root = h('div', { class: 'tool' })
 
   const load = async ([f]) => {
+    const my = ++loadGen
     error = ''
-    try {
-      file = f
-      bytes = await readBytes(f)
-    } catch (e) {
-      error = 'could not read that file'
-      file = null
-      bytes = null
-    }
-    render()
-  }
-
-  const run = async () => {
+    file = f
+    results = null
     busy = true
-    error = ''
     render()
     try {
-      const { images, skipped } = await extractImages(bytes)
-      if (!images.length) {
-        error = skipped
-          ? `found ${skipped} image${skipped === 1 ? '' : 's'} but in formats we can't decode yet (CCITT/JBIG2/masked)`
+      const bytes = await readBytes(f)
+      if (my !== loadGen) return
+      const found = await extractImages(bytes)
+      if (my !== loadGen) return
+      results = found
+      if (!results.images.length) {
+        error = results.skipped
+          ? `found ${results.skipped} image${results.skipped === 1 ? '' : 's'} but in formats we can't decode yet (CCITT/JBIG2/masked)`
           : 'no embedded images found in this PDF'
-        return
       }
-      const stem = file.name.replace(/\.pdf$/i, '')
-      if (images.length === 1) {
-        saveBlob(new Blob([images[0].data]), images[0].name)
-      } else {
-        saveBlob(new Blob([zipStore(images.map((im) => ({ name: im.name, data: im.data })))], { type: 'application/zip' }), `${stem}-images.zip`)
-      }
-      if (skipped) error = `saved ${images.length} — skipped ${skipped} unsupported`
     } catch (e) {
-      error = e.message || 'extraction failed'
+      if (my !== loadGen) return
+      error = e.message || 'could not read that PDF'
+      file = null
+      results = null
     } finally {
-      busy = false
+      if (my === loadGen) busy = false
       render()
     }
   }
 
+  const saveOne = (im) => saveBlob(new Blob([im.data], { type: im.mime }), im.name)
+
+  const saveAll = () => {
+    const stem = file.name.replace(/\.pdf$/i, '')
+    saveBlob(
+      new Blob([zipStore(results.images.map((im) => ({ name: im.name, data: im.data })))], { type: 'application/zip' }),
+      `${stem}-images.zip`,
+    )
+  }
+
   function render() {
-    setKids(root, 
-      DropZone({ accept: 'application/pdf', onFiles: load }),
-      file ? Card(h('p', { class: 'meta' }, h('b', {}, file.name), ' — JPEG / JPEG2000 / raw rasters → PNG')) : null,
+    const imgs = results?.images ?? []
+    setKids(root,
+      DropZone({ accept: 'application/pdf', onFiles: load, label: 'Drop a PDF here or ' }),
+      busy ? h('p', { class: 'meta dim' }, 'Scanning for embedded images…') : null,
+      file && results ? Card(h('p', { class: 'meta' }, h('b', {}, file.name), ` — ${imgs.length} image${imgs.length === 1 ? '' : 's'} extracted${results.skipped ? `, ${results.skipped} skipped (unsupported)` : ''}`)) : null,
+      imgs.length ? ImgGrid({ images: imgs, onSave: saveOne }) : null,
       ErrorText(error),
-      Btn(busy ? 'Extracting…' : 'Extract images', { onclick: run, disabled: busy || !bytes }),
+      imgs.length ? Btn(`Download all ${imgs.length} (.zip)`, { onclick: saveAll }) : null,
     )
   }
   render()
@@ -1739,21 +2225,43 @@ function ExtractImgs() {
 
 // ---- src/tools/pagenum.js ----
 
+const POSITIONS = [
+  ['bc', 'Bottom center'], ['bl', 'Bottom left'], ['br', 'Bottom right'],
+  ['tc', 'Top center'], ['tl', 'Top left'], ['tr', 'Top right'],
+]
+const FORMATS = [
+  ['n-of-total', '1 / 12'], ['n', '1'], ['page-n', 'Page 1'],
+]
+
 function PageNums() {
   let file = null
   let bytes = null
   let pages = 0
+  let pos = 'bc'
+  let fmt = 'n-of-total'
+  let start = 1
+  let size = 10
+  let skipFirst = false
   let busy = false
   let error = ''
+  let loadGen = 0
   const root = h('div', { class: 'tool' })
 
   const load = async ([f]) => {
+    const my = ++loadGen
     error = ''
+    file = f
+    pages = 0
+    render()
     try {
-      file = f
-      bytes = await readBytes(f)
-      pages = await pageCount(bytes)
+      const b = await readBytes(f)
+      if (my !== loadGen) return
+      const count = await pageCount(b)
+      if (my !== loadGen) return
+      bytes = b
+      pages = count
     } catch (e) {
+      if (my !== loadGen) return
       error = e.message || 'could not read that PDF'
       file = null
       bytes = null
@@ -1766,7 +2274,7 @@ function PageNums() {
     error = ''
     render()
     try {
-      const out = await addPageNumbers(bytes)
+      const out = await addPageNumbers(bytes, { pos, fmt, start, size, skipFirst })
       saveBlob(new Blob([out], { type: 'application/pdf' }), `${file.name.replace(/\.pdf$/i, '')}-numbered.pdf`)
     } catch (e) {
       error = e.message || 'failed'
@@ -1776,12 +2284,47 @@ function PageNums() {
     }
   }
 
+  const select = (options, value, onpick) =>
+    h('select', {
+      class: 'textin sel',
+      onchange: (e) => { onpick(e.target.value); render() },
+    }, options.map(([v, label]) =>
+      h('option', { value: v, selected: v === value || undefined }, label)))
+
+  const numin = (value, min, max, onset) =>
+    h('input', {
+      class: 'textin num', type: 'number', value, min, max,
+      onchange: (e) => { onset(Math.max(min, Math.min(max, parseInt(e.target.value, 10) || min))) },
+    })
+
+  const previewLabel = () => {
+    const n = (skipFirst ? 1 : 0) + start
+    const shown = fmt === 'n' ? `${n}` : fmt === 'page-n' ? `Page ${n}` : `${n} / ${pages}`
+    const where = POSITIONS.find(([v]) => v === pos)[1].toLowerCase()
+    return `Preview: "${shown}" · ${where} · ${size}pt Helvetica${skipFirst ? ' · page 1 left blank' : ''}`
+  }
+
   function render() {
-    setKids(root, 
+    setKids(root,
       DropZone({ accept: 'application/pdf', onFiles: load }),
-      file ? Card(h('p', { class: 'meta' }, h('b', {}, file.name), ` — ${pages} pages`), h('p', { class: 'meta dim' }, 'Stamps "N / total" bottom-center in Helvetica 10pt')) : null,
+      file
+        ? Card(
+            h('p', { class: 'meta' }, h('b', {}, file.name), ` — ${pages} pages`),
+            h('div', { class: 'optrow' },
+              h('div', {}, h('label', { class: 'lbl' }, 'Position'), select(POSITIONS, pos, (v) => (pos = v))),
+              h('div', {}, h('label', { class: 'lbl' }, 'Format'), select(FORMATS, fmt, (v) => (fmt = v))),
+              h('div', {}, h('label', { class: 'lbl' }, 'Start at'), numin(start, 0, 9999, (v) => (start = v))),
+              h('div', {}, h('label', { class: 'lbl' }, 'Size (pt)'), numin(size, 6, 48, (v) => (size = v))),
+            ),
+            h('label', { class: 'radio', style: { marginBottom: '10px' } },
+              h('input', { type: 'checkbox', checked: skipFirst || undefined, onchange: (e) => { skipFirst = e.target.checked; render() } }),
+              'Skip first page (covers/title pages stay clean)',
+            ),
+            h('p', { class: 'meta dim' }, previewLabel()),
+          )
+        : null,
       ErrorText(error),
-      Btn(busy ? 'Stamping…' : 'Add page numbers', { onclick: run, disabled: busy || !bytes }),
+      file ? Btn(busy ? 'Stamping…' : 'Add page numbers', { onclick: run, disabled: busy || !bytes }) : null,
     )
   }
   render()
@@ -1793,21 +2336,35 @@ function PageNums() {
 function Scrub() {
   let file = null
   let bytes = null
+  let meta = null // {fields, xmp, id}
   let busy = false
   let error = ''
+  let loadGen = 0
   const root = h('div', { class: 'tool' })
 
   const load = async ([f]) => {
+    const my = ++loadGen
     error = ''
+    file = f
+    meta = null
+    busy = true
+    render()
     try {
-      file = f
-      bytes = await readBytes(f)
+      const b = await readBytes(f)
+      if (my !== loadGen) return
+      const found = await readMetadata(b)
+      if (my !== loadGen) return
+      bytes = b
+      meta = found
     } catch (e) {
-      error = 'could not read that file'
+      if (my !== loadGen) return
+      error = e.message || 'could not read that file'
       file = null
       bytes = null
+    } finally {
+      if (my === loadGen) busy = false
+      render()
     }
-    render()
   }
 
   const run = async () => {
@@ -1826,16 +2383,23 @@ function Scrub() {
   }
 
   function render() {
-    setKids(root, 
+    const leaking = meta && (meta.fields.length || meta.xmp || meta.id)
+    setKids(root,
       DropZone({ accept: 'application/pdf', onFiles: load }),
-      file
+      busy ? h('p', { class: 'meta dim' }, 'Reading metadata…') : null,
+      file && meta
         ? Card(
             h('p', { class: 'meta' }, h('b', {}, file.name)),
-            h('p', { class: 'meta dim' }, 'Rebuilds the document and drops /Info, XMP metadata, document IDs, author/producer fields and dead objects. Pages and content are untouched.'),
+            leaking
+              ? h('p', { class: 'meta dim' }, 'This file is carrying the following — all of it gets wiped:')
+              : null,
+            MetaTable(meta),
           )
         : null,
       ErrorText(error),
-      Btn(busy ? 'Scrubbing…' : 'Scrub metadata', { onclick: run, disabled: busy || !bytes }),
+      file && meta
+        ? Btn(busy ? 'Scrubbing…' : leaking ? 'Scrub it all' : 'Rebuild anyway', { onclick: run, disabled: busy })
+        : null,
     )
   }
   render()

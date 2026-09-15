@@ -28,6 +28,8 @@ const ICONS = {
   download: 'M12 4v12m0 0 4-4m-4 4-4-4M4 20h16',
   x: 'M6 6l12 12M18 6 6 18',
   rotate: 'M20 8A8 8 0 1 0 20 15M20 4v4h-4',
+  rotl: 'M4 8A8 8 0 1 1 4 15M4 4v4h4',
+  check: 'M4 12l5 5L20 6',
   undo: 'M8 6 4 10l4 4M4 10h10a6 6 0 0 1 0 12h-2',
   up: 'M12 19V5m0 0-5 5m5-5 5 5',
   down: 'M12 5v14m0 0 5-5m-5 5-5-5',

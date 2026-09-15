@@ -6,7 +6,8 @@ import { enc, get, isStream, name, ref, set, stream, typeIs } from '../src/pdf/t
 import { newDoc, writeDoc } from '../src/pdf/write.js'
 import {
   addPageNumbers, extractImages, extractPages, imagesToPdf, jpegInfo, mergePdfs,
-  organizePages, pageCount, pageLeaves, parseRanges, scrubPdf, splitPdf, unPredict,
+  organizePages, pageCount, pageDims, pageLeaves, parseRanges, readMetadata,
+  scrubPdf, splitPdf, unPredict,
 } from '../src/pdf/ops.js'
 import { crc32, zipStore } from '../src/zip.js'
 import { pngEncode, zlibStore } from '../src/png.js'
@@ -351,6 +352,194 @@ describe('new tools', () => {
     assert.deepEqual(new Uint8Array(round), data)
   })
 })
+
+describe('qol engine', () => {
+  it('pageDims returns per-page geometry incl inherited + rotation', async () => {
+    const doc = await parsePdf(inheritedPdf())
+    assert.deepEqual(pageDims(doc), [
+      { w: 612, h: 792, rotate: 0 },
+      { w: 700, h: 700, rotate: 0 },
+    ])
+    const rot = await parsePdf(classicPdf([100], { rotate: [90] }))
+    assert.equal(pageDims(rot)[0].rotate, 90)
+  })
+
+  it('readMetadata surfaces Info fields, XMP and doc ID', async () => {
+    const dst = newDoc()
+    const pagesNum = dst.alloc()
+    const pageNum = dst.alloc()
+    dst.set(pageNum, new Map([['Type', name('Page')], ['Parent', ref(pagesNum)], ['MediaBox', [0, 0, 50, 50]]]))
+    dst.set(pagesNum, new Map([['Type', name('Pages')], ['Kids', [ref(pageNum)]], ['Count', 1]]))
+    const metaNum = dst.alloc()
+    dst.set(metaNum, stream(new Map([['Type', name('Metadata')], ['Subtype', name('XML')]]), enc('<x:xmpmeta>x</x:xmpmeta>')))
+    const catNum = dst.alloc()
+    dst.set(catNum, new Map([['Type', name('Catalog')], ['Pages', ref(pagesNum)], ['Metadata', ref(metaNum)]]))
+    const bytes = writeDoc(dst, catNum)
+    const dirty = enc(new TextDecoder('latin1').decode(bytes).replace(
+      '/Root ' + catNum + ' 0 R >>',
+      `/Root ${catNum} 0 R /Info << /Author (sneaky) /Producer (acme) >> /ID [<aa><bb>] >>`,
+    ))
+    const meta = await readMetadata(dirty)
+    assert.equal(meta.xmp, true)
+    assert.equal(meta.id, true)
+    const kv = Object.fromEntries(meta.fields.map((f) => [f.key, f.value]))
+    assert.equal(kv.Author, 'sneaky')
+    assert.equal(kv.Producer, 'acme')
+  })
+
+  it('readMetadata decodes UTF-16BE strings', async () => {
+    const dst = newDoc()
+    const pagesNum = dst.alloc()
+    const pageNum = dst.alloc()
+    dst.set(pageNum, new Map([['Type', name('Page')], ['Parent', ref(pagesNum)], ['MediaBox', [0, 0, 50, 50]]]))
+    dst.set(pagesNum, new Map([['Type', name('Pages')], ['Kids', [ref(pageNum)]], ['Count', 1]]))
+    const catNum = dst.alloc()
+    dst.set(catNum, new Map([['Type', name('Catalog')], ['Pages', ref(pagesNum)]]))
+    const bytes = writeDoc(dst, catNum)
+    // /Title <FEFF00480069> = UTF-16BE "Hi"
+    const dirty = enc(new TextDecoder('latin1').decode(bytes).replace(
+      '/Root ' + catNum + ' 0 R >>',
+      `/Root ${catNum} 0 R /Info << /Title <FEFF00480069> >> >>`,
+    ))
+    const meta = await readMetadata(dirty)
+    assert.equal(meta.fields.find((f) => f.key === 'Title').value, 'Hi')
+  })
+
+  it('addPageNumbers honors position, format, start, skipFirst, size', async () => {
+    const out = await addPageNumbers(classicPdf([100, 200, 300]), {
+      pos: 'tr', fmt: 'page-n', start: 5, skipFirst: true, size: 14, margin: 30,
+    })
+    const doc = await parsePdf(out)
+    const leaves = pageLeaves(doc)
+    // page 1 skipped: no trailing label stream
+    const c0 = get(leaves[0].dict, 'Contents')
+    assert.equal(c0, undefined)
+    // page 2 stamped "Page 6" top-right at 14pt
+    const c1 = get(leaves[1].dict, 'Contents')
+    const lastRef = Array.isArray(c1) ? c1[c1.length - 1] : c1
+    const text = new TextDecoder('latin1').decode(deref(doc, lastRef).data)
+    assert.match(text, /BT \/PDFFnt1 14 Tf/)
+    assert.match(text, /\(Page 6\) Tj/)
+    // top-right: baseline y = 400-30-0.72*14 = 359.9, x = 200-30-42 = 128 (cm translation)
+    assert.match(text, /q 1 0 0 1 128\.0 359\.9 cm/)
+  })
+
+  it('addPageNumbers preserves indirect page Resources', async () => {
+    const dst = newDoc()
+    const pagesNum = dst.alloc()
+    const resNum = dst.alloc()
+    dst.set(resNum, new Map([['ProcSet', [name('PDF'), name('Text')]]]))
+    const pageNum = dst.alloc()
+    dst.set(pageNum, new Map([
+      ['Type', name('Page')], ['Parent', ref(pagesNum)],
+      ['MediaBox', [0, 0, 100, 100]], ['Resources', ref(resNum)],
+    ]))
+    dst.set(pagesNum, new Map([['Type', name('Pages')], ['Kids', [ref(pageNum)]], ['Count', 1]]))
+    const catNum = dst.alloc()
+    dst.set(catNum, new Map([['Type', name('Catalog')], ['Pages', ref(pagesNum)]]))
+    const out = await addPageNumbers(writeDoc(dst, catNum))
+    const doc = await parsePdf(out)
+    const leaf = pageLeaves(doc)[0]
+    const res = deref(doc, get(leaf.dict, 'Resources'))
+    assert.ok(res instanceof Map, 'indirect /Resources must survive stamping')
+    assert.deepEqual(res.get('ProcSet').map((n) => n.v), ['PDF', 'Text'])
+    assert.equal(get(get(res, 'Font'), 'PDFFnt1') instanceof Map, true)
+  })
+
+  it('addPageNumbers counter-rotates the stamp on rotated pages', async () => {
+    const out = await addPageNumbers(classicPdf([100], { rotate: [90] }), { pos: 'bc' })
+    const doc = await parsePdf(out)
+    const leaf = pageLeaves(doc)[0]
+    const contents = get(leaf.dict, 'Contents')
+    const lastRef = Array.isArray(contents) ? contents[contents.length - 1] : contents
+    const text = new TextDecoder('latin1').decode(deref(doc, lastRef).data)
+    assert.match(text, /q 0 1 -1 0 [\d.]+ [\d.]+ cm/)
+  })
+
+  it('scrubPdf drops page annotations carrying author data', async () => {
+    const dst = newDoc()
+    const pagesNum = dst.alloc()
+    const annotNum = dst.alloc()
+    dst.set(annotNum, new Map([['Type', name('Annot')], ['Subtype', name('Text')]]))
+    const pageNum = dst.alloc()
+    dst.set(pageNum, new Map([
+      ['Type', name('Page')], ['Parent', ref(pagesNum)],
+      ['MediaBox', [0, 0, 50, 50]], ['Annots', [ref(annotNum)]],
+      ['PieceInfo', new Map([['Illustrator', new Map()]])],
+    ]))
+    dst.set(pagesNum, new Map([['Type', name('Pages')], ['Kids', [ref(pageNum)]], ['Count', 1]]))
+    const catNum = dst.alloc()
+    dst.set(catNum, new Map([['Type', name('Catalog')], ['Pages', ref(pagesNum)]]))
+    const dirty = writeDoc(dst, catNum)
+    const clean = new TextDecoder('latin1').decode(await scrubPdf(dirty))
+    assert.ok(!clean.includes('/Annots'), 'annotations should be gone')
+    assert.ok(!clean.includes('/PieceInfo'), 'piece info should be gone')
+    // merge keeps annotations — stripping is a scrub-only choice
+    const merged = new TextDecoder('latin1').decode(await mergePdfs([dirty]))
+    assert.ok(merged.includes('/Annots'), 'merge should preserve annotations')
+  })
+
+  it('extractImages unwraps flate-wrapped jpeg filter chains', async () => {
+    const dst = newDoc()
+    const pagesNum = dst.alloc()
+    const imgNum = dst.alloc()
+    const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xd9])
+    const wrapped = deflateSync(jpeg)
+    dst.set(imgNum, stream(new Map([
+      ['Type', name('XObject')], ['Subtype', name('Image')],
+      ['Width', 4], ['Height', 4], ['ColorSpace', name('DeviceRGB')],
+      ['BitsPerComponent', 8], ['Filter', [name('FlateDecode'), name('DCTDecode')]],
+      ['Length', wrapped.length],
+    ]), wrapped))
+    const pageNum = dst.alloc()
+    dst.set(pageNum, new Map([
+      ['Type', name('Page')], ['Parent', ref(pagesNum)], ['MediaBox', [0, 0, 100, 100]],
+      ['Resources', new Map([['XObject', new Map([['Im0', ref(imgNum)]])]])],
+    ]))
+    dst.set(pagesNum, new Map([['Type', name('Pages')], ['Kids', [ref(pageNum)]], ['Count', 1]]))
+    const catNum = dst.alloc()
+    dst.set(catNum, new Map([['Type', name('Catalog')], ['Pages', ref(pagesNum)]]))
+    const { images, skipped } = await extractImages(writeDoc(dst, catNum))
+    assert.equal(skipped, 0)
+    assert.equal(images.length, 1)
+    assert.deepEqual([...images[0].data], [...jpeg])
+    assert.equal(images[0].mime, 'image/jpeg')
+  })
+
+  it('extractImages tags output mime types', async () => {
+    const { images } = await extractImages(pdfWithImagesMime())
+    assert.equal(images.find((i) => i.name.endsWith('.jpg')).mime, 'image/jpeg')
+    assert.equal(images.find((i) => i.name.endsWith('.png')).mime, 'image/png')
+  })
+})
+
+/** Minimal image-bearing pdf for the mime test. */
+function pdfWithImagesMime() {
+  const dst = newDoc()
+  const pagesNum = dst.alloc()
+  const jpgNum = dst.alloc()
+  dst.set(jpgNum, stream(new Map([
+    ['Type', name('XObject')], ['Subtype', name('Image')],
+    ['Width', 4], ['Height', 4], ['ColorSpace', name('DeviceRGB')],
+    ['BitsPerComponent', 8], ['Filter', name('DCTDecode')], ['Length', 10],
+  ]), new Uint8Array(10).fill(0xab)))
+  const raw = deflateSync(new Uint8Array(12).fill(0x7f))
+  const rawNum = dst.alloc()
+  dst.set(rawNum, stream(new Map([
+    ['Type', name('XObject')], ['Subtype', name('Image')],
+    ['Width', 2], ['Height', 2], ['ColorSpace', name('DeviceRGB')],
+    ['BitsPerComponent', 8], ['Filter', name('FlateDecode')], ['Length', raw.length],
+  ]), raw))
+  const pageNum = dst.alloc()
+  dst.set(pageNum, new Map([
+    ['Type', name('Page')], ['Parent', ref(pagesNum)], ['MediaBox', [0, 0, 100, 100]],
+    ['Resources', new Map([['XObject', new Map([['Im0', ref(jpgNum)], ['Im1', ref(rawNum)]])]])],
+  ]))
+  dst.set(pagesNum, new Map([['Type', name('Pages')], ['Kids', [ref(pageNum)]], ['Count', 1]]))
+  const catNum = dst.alloc()
+  dst.set(catNum, new Map([['Type', name('Catalog')], ['Pages', ref(pagesNum)]]))
+  return writeDoc(dst, catNum)
+}
 
 describe('zipStore', () => {
   it('produces a valid zip structure', () => {

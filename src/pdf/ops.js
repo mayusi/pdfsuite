@@ -1,4 +1,4 @@
-import { get, isName, isRef, isStream, name, ref, set, stream, typeIs } from './types.js'
+import { dec, get, isHex, isName, isRef, isStream, isStr, name, ref, set, stream, typeIs } from './types.js'
 import { deref, parsePdf } from './parse.js'
 import { newDoc, writeDoc } from './write.js'
 import { inflate } from './env.js'
@@ -42,6 +42,50 @@ export async function pageCount(bytes) {
   return pageLeaves(await parsePdf(bytes)).length
 }
 
+/** Per-page geometry for UI pickers: [{w, h, rotate}] — MediaBox + inherited Rotate. */
+export function pageDims(doc) {
+  return pageLeaves(doc).map((leaf) => {
+    let mb = get(leaf.dict, 'MediaBox') ?? leaf.inh.MediaBox
+    if (isRef(mb)) mb = deref(doc, mb)
+    if (!Array.isArray(mb)) mb = [0, 0, 612, 792]
+    const rot = get(leaf.dict, 'Rotate') ?? leaf.inh.Rotate ?? 0
+    return { w: Math.round(mb[2] - mb[0]), h: Math.round(mb[3] - mb[1]), rotate: typeof rot === 'number' ? rot : 0 }
+  })
+}
+
+const textVal = (v) => {
+  if (isStr(v) || isHex(v)) {
+    const b = v.bytes
+    if (b[0] === 0xfe && b[1] === 0xff) return new TextDecoder('utf-16be').decode(b.subarray(2))
+    return dec(b).replace(/\x00+$/, '')
+  }
+  if (isName(v)) return '/' + v.v
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v)
+  return null
+}
+
+/**
+ * What the file says about you: /Info fields, XMP presence, doc ID presence.
+ * Drives the Scrub tool's "here's what's leaking" preview.
+ */
+export async function readMetadata(bytes) {
+  const doc = await parsePdf(bytes)
+  const out = { fields: [], xmp: false, id: false }
+  const infoRaw = get(doc.trailer, 'Info')
+  const info = isRef(infoRaw) ? deref(doc, infoRaw) : infoRaw
+  if (info instanceof Map) {
+    for (const [k, v] of info) {
+      const s = textVal(isRef(v) ? deref(doc, v) : v)
+      if (s) out.fields.push({ key: k, value: s })
+    }
+  }
+  const root = deref(doc, get(doc.trailer, 'Root'))
+  const catalog = isStream(root) ? root.dict : root
+  if (get(catalog, 'Metadata') !== undefined) out.xmp = true
+  if (get(doc.trailer, 'ID') !== undefined) out.id = true
+  return out
+}
+
 /** Deep-copy a value across docs, remapping refs. */
 function copyValue(v, src, dst, refMap) {
   if (isRef(v)) {
@@ -68,8 +112,9 @@ function copyValue(v, src, dst, refMap) {
 /**
  * Append selected pages of `srcDoc` into `dst` under `pagesRef`.
  * `picks` = [{leaf, rotateDelta}] — leaves already walked (source order preserved by caller).
+ * `strip` names extra page-dict keys to drop (privacy scrubbing).
  */
-function appendPages(srcDoc, picks, dst, pagesRef, kids) {
+function appendPages(srcDoc, picks, dst, pagesRef, kids, strip = []) {
   const refMap = new Map()
   for (const { leaf, rotateDelta } of picks) {
     const num = dst.alloc()
@@ -80,7 +125,7 @@ function appendPages(srcDoc, picks, dst, pagesRef, kids) {
       if (v !== undefined) pageDict.set(k, copyValue(v, srcDoc, dst, refMap))
     }
     for (const [k, val] of leaf.dict) {
-      if (k === 'Parent' || k === 'Metadata' || INHERITED.includes(k)) continue
+      if (k === 'Parent' || k === 'Metadata' || INHERITED.includes(k) || strip.includes(k)) continue
       pageDict.set(k, copyValue(val, srcDoc, dst, refMap))
     }
     pageDict.set('Type', name('Page'))
@@ -231,15 +276,27 @@ export function imagesToPdf(images) {
 const pdfStr = (s) => '(' + s.replace(/[\\()]/g, (c) => '\\' + c) + ')'
 
 /**
- * Stamp "N / total" centered at the bottom of every page.
+ * Stamp a label on every page.
+ * opts: pos 'tl'|'tc'|'tr'|'bl'|'bc'|'br' (default 'bc'),
+ *       fmt 'n'|'n-of-total'|'page-n' (default 'n-of-total'),
+ *       start (number shown on first stamped page, default 1),
+ *       skipFirst (don't stamp page 1), size (pt, default 10), margin (pt, default 18).
  * Appends a content stream ON TOP of existing content and injects a
  * Helvetica base-14 font under an unlikely-colliding resource name.
  */
-export async function addPageNumbers(bytes) {
+export async function addPageNumbers(bytes, opts = {}) {
+  const { pos = 'bc', fmt = 'n-of-total', start = 1, skipFirst = false, size = 10, margin = 18 } = opts
   const src = await parsePdf(bytes)
   const leaves = pageLeaves(src)
   const total = leaves.length
   const fontResName = 'PDFFnt1'
+
+  const labelFor = (i) => {
+    const n = i + start
+    if (fmt === 'n') return String(n)
+    if (fmt === 'page-n') return `Page ${n}`
+    return `${n} / ${total}`
+  }
 
   const dst = newDoc()
   const pagesRef = dst.alloc()
@@ -262,15 +319,39 @@ export async function addPageNumbers(bytes) {
     pageDict.set('Type', name('Page'))
     pageDict.set('Parent', ref(pagesRef, 0))
 
-    // label stream: "i+1 / total" centered on the MediaBox width
-    const mb = pageDict.get('MediaBox') ?? [0, 0, 612, 792]
+    if (i === 0 && skipFirst) {
+      dst.set(num, pageDict)
+      continue
+    }
+
+    // label position is chosen in DISPLAY space (what the user sees), then
+    // mapped back into the page's user space honouring /Rotate.
+    const mbSrc = get(leaf.dict, 'MediaBox') ?? leaf.inh.MediaBox
+    const mbResolved = isRef(mbSrc) ? deref(src, mbSrc) : mbSrc
+    const mb = Array.isArray(mbResolved) ? mbResolved : [0, 0, 612, 792]
+    const rotSrc = get(leaf.dict, 'Rotate') ?? leaf.inh.Rotate ?? 0
+    const rot = typeof rotSrc === 'number' ? ((rotSrc % 360) + 360) % 360 : 0
     const w = mb[2] - mb[0]
-    const label = `${i + 1} / ${total}`
-    const x = mb[0] + w / 2 - label.length * 2.5 // ~5pt/char at 10pt Helvetica
-    const y = mb[1] + 18
+    const hh = mb[3] - mb[1]
+    const dw = rot % 180 === 0 ? w : hh
+    const dh = rot % 180 === 0 ? hh : w
+    const label = labelFor(i)
+    const charW = size * 0.5 // ~half-em advance for Helvetica digits
+    const xd = pos.endsWith('l') ? margin
+      : pos.endsWith('r') ? dw - margin - label.length * charW
+      : dw / 2 - (label.length * charW) / 2
+    const yd = pos.startsWith('t') ? dh - margin - size * 0.72 : margin
+    // display (xd,yd) → user (xu,yu) for each quarter-turn, then counter-rotate
+    // the text matrix so the label reads upright on the displayed page.
+    const [xu, yu, m] =
+      rot === 90 ? [w - yd, xd, [0, 1, -1, 0]]
+      : rot === 180 ? [w - xd, hh - yd, [-1, 0, 0, -1]]
+      : rot === 270 ? [yd, hh - xd, [0, -1, 1, 0]]
+      : [xd, yd, [1, 0, 0, 1]]
     const csNum = dst.alloc()
     dst.set(csNum, stream(new Map(), new TextEncoder().encode(
-      `BT /${fontResName} 10 Tf 0 g ${x.toFixed(1)} ${y.toFixed(1)} Td ${pdfStr(label)} Tj ET`,
+      `q ${m[0]} ${m[1]} ${m[2]} ${m[3]} ${(mb[0] + xu).toFixed(1)} ${(mb[1] + yu).toFixed(1)} cm ` +
+      `BT /${fontResName} ${size} Tf 0 g 0 0 Td ${pdfStr(label)} Tj ET Q`,
     )))
 
     // contents = existing contents + ours last (draws on top)
@@ -279,12 +360,13 @@ export async function addPageNumbers(bytes) {
     arr.push(ref(csNum, 0))
     pageDict.set('Contents', arr.length === 1 ? arr[0] : arr)
 
-    // resources: copy inherited, add our font if slot free
+    // resources: pageDict already holds dst-space copies/refs — resolve any
+    // indirect /Resources or /Font against dst.objects, never against src.
     let res = pageDict.get('Resources')
-    if (isRef(res)) res = deref(src, res) instanceof Map ? copyValue(deref(src, res), src, dst, refMap) : undefined
+    if (isRef(res)) res = dst.objects.get(res.n)
     if (!(res instanceof Map)) res = new Map()
     let fonts = res.get('Font')
-    if (isRef(fonts)) fonts = copyValue(deref(src, fonts), src, dst, refMap)
+    if (isRef(fonts)) fonts = dst.objects.get(fonts.n)
     if (!(fonts instanceof Map)) fonts = new Map()
     if (!fonts.has(fontResName)) {
       fonts.set(fontResName, new Map([
@@ -300,14 +382,20 @@ export async function addPageNumbers(bytes) {
   return finishDoc(dst, pagesRef, kids)
 }
 
-/** Rebuild dropping /Info, XMP /Metadata, doc IDs — tracker scrub. */
+/**
+ * Rebuild dropping /Info, XMP /Metadata, doc IDs, per-page annotations (author
+ * names, comments, popup threads) and /PieceInfo — tracker scrub.
+ */
 export async function scrubPdf(bytes) {
   const src = await parsePdf(bytes)
   const leaves = pageLeaves(src)
   const dst = newDoc()
   const pagesRef = dst.alloc()
   const kids = []
-  appendPages(src, leaves.map((leaf) => ({ leaf, rotateDelta: 0 })), dst, pagesRef, kids)
+  appendPages(src, leaves.map((leaf) => ({ leaf, rotateDelta: 0 })), dst, pagesRef, kids, [
+    'Annots',
+    'PieceInfo',
+  ])
   return finishDoc(dst, pagesRef, kids)
 }
 
@@ -373,33 +461,43 @@ export async function extractImages(bytes) {
     i++
     const w = get(v.dict, 'Width') ?? 0
     const h = get(v.dict, 'Height') ?? 0
-    let filter = get(v.dict, 'Filter')
-    if (Array.isArray(filter)) filter = filter[filter.length - 1]
-    const f = isName(filter) ? filter.v : null
+    const filterVal = get(v.dict, 'Filter')
+    const chain = (Array.isArray(filterVal) ? filterVal : filterVal === undefined ? [] : [filterVal]).map(
+      (fl) => (isName(fl) ? fl.v : null),
+    )
     const stem = `image-${i}-${w}x${h}`
+    const codec = { DCTDecode: ['.jpg', 'image/jpeg'], DCT: ['.jpg', 'image/jpeg'], JPXDecode: ['.jp2', 'image/jp2'], JPX: ['.jp2', 'image/jp2'] }
     try {
-      if (f === 'DCTDecode') {
-        images.push({ name: `${stem}.jpg`, data: v.data, w, h })
-      } else if (f === 'JPXDecode') {
-        images.push({ name: `${stem}.jp2`, data: v.data, w, h })
-      } else if (f === 'FlateDecode' || f === null || f === 'Fl') {
+      const last = chain.length ? chain[chain.length - 1] : null
+      const out = last ? codec[last] : undefined
+      // Every filter except a trailing image codec is a compression layer to
+      // unwrap in listed order (e.g. [/FlateDecode /DCTDecode] = flate(jpeg)).
+      const decodeChain = out ? chain.slice(0, -1) : chain
+      let data = v.data
+      for (const fl of decodeChain) {
+        if (fl === 'FlateDecode' || fl === 'Fl') data = await inflate(data)
+        else throw new Error(`unsupported filter ${fl}`)
+      }
+      if (out) {
+        images.push({ name: `${stem}${out[0]}`, data, w, h, mime: out[1] })
+      } else if (decodeChain.every((fl) => fl === 'FlateDecode' || fl === 'Fl' || fl === null)) {
         const bpc = get(v.dict, 'BitsPerComponent') ?? 8
         let cs = get(v.dict, 'ColorSpace')
         if (isRef(cs)) cs = deref(doc, cs)
         const csName = isName(cs) ? cs.v : Array.isArray(cs) && isName(cs[0]) ? cs[0].v : null
         if (bpc !== 8 || (csName !== 'DeviceRGB' && csName !== 'DeviceGray')) { skipped++; continue }
         const colors = csName === 'DeviceRGB' ? 3 : 1
-        let raw = f === null ? v.data : await inflate(v.data)
-        const dp = get(v.dict, 'DecodeParms') ?? get(v.dict, 'DP')
+        let dp = get(v.dict, 'DecodeParms') ?? get(v.dict, 'DP')
+        if (Array.isArray(dp)) dp = [...dp].reverse().find((x) => x instanceof Map)
         const parms = dp instanceof Map ? {
           predictor: get(dp, 'Predictor') ?? 1,
           columns: get(dp, 'Columns') ?? w,
           colors: get(dp, 'Colors') ?? colors,
           bpc: get(dp, 'BitsPerComponent') ?? 8,
         } : { predictor: 1, columns: w, colors, bpc: 8 }
-        raw = unPredict(raw, parms)
+        const raw = unPredict(data, parms)
         if (raw.length !== w * h * colors) { skipped++; continue }
-        images.push({ name: `${stem}.png`, data: pngEncode(w, h, raw, colors === 1), w, h })
+        images.push({ name: `${stem}.png`, data: pngEncode(w, h, raw, colors === 1), w, h, mime: 'image/png' })
       } else {
         skipped++
       }

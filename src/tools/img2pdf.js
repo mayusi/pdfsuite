@@ -1,5 +1,5 @@
 import { h, setKids, readBytes, saveBlob } from '../ui/dom.js'
-import { Btn, Card, DropZone, ErrorText, FileList } from '../ui/widgets.js'
+import { Btn, Card, DropZone, ErrorText, ThumbList } from '../ui/widgets.js'
 import { imagesToPdf } from '../pdf/ops.js'
 
 /** Any raster → JPEG bytes via the browser's own decoder (canvas). */
@@ -17,10 +17,30 @@ async function toJpeg(file) {
 }
 
 export function ImgToPdf() {
-  let files = []
+  let files = [] // {file, url, dims}
   let busy = false
   let error = ''
   const root = h('div', { class: 'tool' })
+
+  const add = async (incoming) => {
+    for (const f of incoming) {
+      const entry = { file: f, url: URL.createObjectURL(f), dims: null }
+      files.push(entry)
+      render()
+      try {
+        const bmp = await createImageBitmap(f)
+        entry.dims = `${bmp.width}×${bmp.height}`
+        bmp.close()
+      } catch { /* non-decodable → toJpeg will surface it on build */ }
+      render()
+    }
+  }
+
+  const remove = (i) => {
+    URL.revokeObjectURL(files[i].url)
+    files = files.filter((_, j) => j !== i)
+    render()
+  }
 
   const move = (from, to) => {
     const c = [...files]
@@ -35,7 +55,7 @@ export function ImgToPdf() {
     error = ''
     render()
     try {
-      const images = await Promise.all(files.map(async (f) => ({ data: await toJpeg(f) })))
+      const images = await Promise.all(files.map(async (f) => ({ data: await toJpeg(f.file) })))
       const out = imagesToPdf(images)
       saveBlob(new Blob([out], { type: 'application/pdf' }), 'images.pdf')
     } catch (e) {
@@ -47,14 +67,19 @@ export function ImgToPdf() {
   }
 
   function render() {
-    setKids(root, 
+    setKids(root,
       DropZone({
         accept: 'image/jpeg,image/png,image/webp,image/gif,image/bmp',
         multiple: true,
-        onFiles: (f) => { files = files.concat(f); render() },
+        onFiles: add,
         label: 'Drop images here or ',
       }),
-      files.length ? Card(FileList({ files, onMove: move, onRemove: (i) => { files = files.filter((_, j) => j !== i); render() } })) : null,
+      files.length
+        ? Card(
+            ThumbList({ files, onMove: move, onRemove: remove }),
+            h('p', { class: 'meta dim', style: { marginTop: '10px' } }, 'Drag to reorder — each image becomes one page at native size'),
+          )
+        : null,
       ErrorText(error),
       Btn(busy ? 'Building…' : `Build PDF from ${files.length} image${files.length === 1 ? '' : 's'}`, {
         onclick: run,
