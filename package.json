@@ -1,0 +1,12 @@
+{
+  "name": "pdfsuite",
+  "version": "1.0.0",
+  "description": "Every PDF tool you'd pay Smallpdf $12/mo for — free, zero dependencies, 100% client-side",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "node serve.mjs",
+    "build": "node build.mjs",
+    "test": "node --test \"test/*.test.mjs\""
+  }
+}
