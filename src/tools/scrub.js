@@ -1,4 +1,4 @@
-import { h, readBytes, saveBlob } from '../ui/dom.js'
+import { h, setKids, readBytes, saveBlob } from '../ui/dom.js'
 import { Btn, Card, DropZone, ErrorText } from '../ui/widgets.js'
 import { scrubPdf } from '../pdf/ops.js'
 
@@ -28,9 +28,7 @@ export function Scrub() {
     render()
     try {
       const out = await scrubPdf(bytes)
-      const saved = bytes.length - out.length
       saveBlob(new Blob([out], { type: 'application/pdf' }), `${file.name.replace(/\.pdf$/i, '')}-clean.pdf`)
-      if (saved > 0) error = ''
     } catch (e) {
       error = e.message || 'failed'
     } finally {
@@ -40,7 +38,7 @@ export function Scrub() {
   }
 
   function render() {
-    root.replaceChildren(
+    setKids(root, 
       DropZone({ accept: 'application/pdf', onFiles: load }),
       file
         ? Card(

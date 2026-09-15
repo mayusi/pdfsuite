@@ -1,4 +1,4 @@
-import { h, readBytes, saveBlob } from '../ui/dom.js'
+import { h, setKids, readBytes, saveBlob } from '../ui/dom.js'
 import { Btn, Card, DropZone, ErrorText } from '../ui/widgets.js'
 import { extractImages } from '../pdf/ops.js'
 import { zipStore } from '../zip.js'
@@ -51,7 +51,7 @@ export function ExtractImgs() {
   }
 
   function render() {
-    root.replaceChildren(
+    setKids(root, 
       DropZone({ accept: 'application/pdf', onFiles: load }),
       file ? Card(h('p', { class: 'meta' }, h('b', {}, file.name), ' — JPEG / JPEG2000 / raw rasters → PNG')) : null,
       ErrorText(error),

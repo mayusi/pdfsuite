@@ -23,7 +23,10 @@ createServer(async (req, res) => {
     const file = normalize(join(process.cwd(), path))
     if (!file.startsWith(process.cwd())) throw new Error('path escape')
     const body = await readFile(file)
-    res.writeHead(200, { 'content-type': MIME[extname(file)] ?? 'application/octet-stream' })
+    res.writeHead(200, {
+      'content-type': MIME[extname(file)] ?? 'application/octet-stream',
+      'cache-control': 'no-store', // dev server: always serve fresh
+    })
     res.end(body)
   } catch {
     res.writeHead(404)

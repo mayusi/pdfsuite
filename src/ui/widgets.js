@@ -20,7 +20,22 @@ export function DropZone({ accept, multiple = false, onFiles, label }) {
 
   const zone = h(
     'label',
-    { class: 'dropzone' },
+    {
+      class: 'dropzone',
+      tabindex: '0',
+      role: 'button',
+      onclick: (e) => {
+        if (e.target === input) return // our own input.click() bubbling up — don't loop
+        e.preventDefault() // kill native label forwarding; JS path opens exactly one dialog
+        input.click()
+      },
+      onkeydown: (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          input.click()
+        }
+      },
+    },
     input,
     icon('upload', 'icon-lg dim'),
     h('span', { class: 'dz-text' }, label ?? `Drop ${multiple ? 'files' : 'a file'} here or `, h('em', {}, 'browse')),

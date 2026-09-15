@@ -71,6 +71,7 @@ main h1 { font-size: 24px; margin-top: 14px; }
   text-align: center;
 }
 .dropzone:hover { border-color: var(--faint); }
+.dropzone:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .dropzone.over { border-color: var(--accent); background: rgba(52, 211, 153, 0.08); }
 .dz-text em { color: var(--accent); font-style: normal; }
 .hidden-input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
@@ -1204,6 +1205,12 @@ function icon(name, cls = 'icon') {
   return svg
 }
 
+// replaceChildren converts null/undefined args into literal "null" text nodes —
+// always re-render through this instead.
+function setKids(el, ...kids) {
+  el.replaceChildren(...kids.filter((k) => k !== null && k !== undefined && k !== false))
+}
+
 function saveBlob(blob, name) {
   const url = URL.createObjectURL(blob)
   const a = h('a', { href: url, download: name })
@@ -1241,7 +1248,22 @@ function DropZone({ accept, multiple = false, onFiles, label }) {
 
   const zone = h(
     'label',
-    { class: 'dropzone' },
+    {
+      class: 'dropzone',
+      tabindex: '0',
+      role: 'button',
+      onclick: (e) => {
+        if (e.target === input) return // our own input.click() bubbling up — don't loop
+        e.preventDefault() // kill native label forwarding; JS path opens exactly one dialog
+        input.click()
+      },
+      onkeydown: (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          input.click()
+        }
+      },
+    },
     input,
     icon('upload', 'icon-lg dim'),
     h('span', { class: 'dz-text' }, label ?? `Drop ${multiple ? 'files' : 'a file'} here or `, h('em', {}, 'browse')),
@@ -1380,7 +1402,7 @@ function Merge() {
   }
 
   function render() {
-    root.replaceChildren(
+    setKids(root, 
       DropZone({
         accept: 'application/pdf',
         multiple: true,
@@ -1454,7 +1476,7 @@ function Split() {
   }
 
   function render() {
-    root.replaceChildren(
+    setKids(root, 
       DropZone({ accept: 'application/pdf', onFiles: load }),
       file
         ? Card(
@@ -1553,7 +1575,7 @@ function Organize() {
 
   function render() {
     const kept = items.filter((i) => !i.deleted).length
-    root.replaceChildren(
+    setKids(root, 
       DropZone({ accept: 'application/pdf', onFiles: load }),
       items.length
         ? h('p', { class: 'meta dim' }, `Drag to reorder · rotate / delete on hover · ${kept} of ${items.length} pages kept`)
@@ -1635,7 +1657,7 @@ function ImgToPdf() {
   }
 
   function render() {
-    root.replaceChildren(
+    setKids(root, 
       DropZone({
         accept: 'image/jpeg,image/png,image/webp,image/gif,image/bmp',
         multiple: true,
@@ -1704,7 +1726,7 @@ function ExtractImgs() {
   }
 
   function render() {
-    root.replaceChildren(
+    setKids(root, 
       DropZone({ accept: 'application/pdf', onFiles: load }),
       file ? Card(h('p', { class: 'meta' }, h('b', {}, file.name), ' — JPEG / JPEG2000 / raw rasters → PNG')) : null,
       ErrorText(error),
@@ -1755,7 +1777,7 @@ function PageNums() {
   }
 
   function render() {
-    root.replaceChildren(
+    setKids(root, 
       DropZone({ accept: 'application/pdf', onFiles: load }),
       file ? Card(h('p', { class: 'meta' }, h('b', {}, file.name), ` — ${pages} pages`), h('p', { class: 'meta dim' }, 'Stamps "N / total" bottom-center in Helvetica 10pt')) : null,
       ErrorText(error),
@@ -1794,9 +1816,7 @@ function Scrub() {
     render()
     try {
       const out = await scrubPdf(bytes)
-      const saved = bytes.length - out.length
       saveBlob(new Blob([out], { type: 'application/pdf' }), `${file.name.replace(/\.pdf$/i, '')}-clean.pdf`)
-      if (saved > 0) error = ''
     } catch (e) {
       error = e.message || 'failed'
     } finally {
@@ -1806,7 +1826,7 @@ function Scrub() {
   }
 
   function render() {
-    root.replaceChildren(
+    setKids(root, 
       DropZone({ accept: 'application/pdf', onFiles: load }),
       file
         ? Card(

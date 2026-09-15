@@ -57,6 +57,12 @@ export function icon(name, cls = 'icon') {
   return svg
 }
 
+// replaceChildren converts null/undefined args into literal "null" text nodes —
+// always re-render through this instead.
+export function setKids(el, ...kids) {
+  el.replaceChildren(...kids.filter((k) => k !== null && k !== undefined && k !== false))
+}
+
 export function saveBlob(blob, name) {
   const url = URL.createObjectURL(blob)
   const a = h('a', { href: url, download: name })

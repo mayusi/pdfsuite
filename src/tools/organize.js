@@ -1,4 +1,4 @@
-import { h, readBytes, saveBlob } from '../ui/dom.js'
+import { h, setKids, readBytes, saveBlob } from '../ui/dom.js'
 import { Btn, DropZone, ErrorText, PageGrid } from '../ui/widgets.js'
 import { get } from '../pdf/types.js'
 import { parsePdf } from '../pdf/parse.js'
@@ -60,7 +60,7 @@ export function Organize() {
 
   function render() {
     const kept = items.filter((i) => !i.deleted).length
-    root.replaceChildren(
+    setKids(root, 
       DropZone({ accept: 'application/pdf', onFiles: load }),
       items.length
         ? h('p', { class: 'meta dim' }, `Drag to reorder · rotate / delete on hover · ${kept} of ${items.length} pages kept`)

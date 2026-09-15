@@ -1,4 +1,4 @@
-import { h, readBytes, saveBlob } from '../ui/dom.js'
+import { h, setKids, readBytes, saveBlob } from '../ui/dom.js'
 import { Btn, Card, DropZone, ErrorText, FileList } from '../ui/widgets.js'
 import { mergePdfs } from '../pdf/ops.js'
 
@@ -33,7 +33,7 @@ export function Merge() {
   }
 
   function render() {
-    root.replaceChildren(
+    setKids(root, 
       DropZone({
         accept: 'application/pdf',
         multiple: true,

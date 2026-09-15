@@ -63,6 +63,7 @@ main h1 { font-size: 24px; margin-top: 14px; }
   text-align: center;
 }
 .dropzone:hover { border-color: var(--faint); }
+.dropzone:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .dropzone.over { border-color: var(--accent); background: rgba(52, 211, 153, 0.08); }
 .dz-text em { color: var(--accent); font-style: normal; }
 .hidden-input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }

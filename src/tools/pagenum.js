@@ -1,4 +1,4 @@
-import { h, readBytes, saveBlob } from '../ui/dom.js'
+import { h, setKids, readBytes, saveBlob } from '../ui/dom.js'
 import { Btn, Card, DropZone, ErrorText } from '../ui/widgets.js'
 import { addPageNumbers, pageCount } from '../pdf/ops.js'
 
@@ -40,7 +40,7 @@ export function PageNums() {
   }
 
   function render() {
-    root.replaceChildren(
+    setKids(root, 
       DropZone({ accept: 'application/pdf', onFiles: load }),
       file ? Card(h('p', { class: 'meta' }, h('b', {}, file.name), ` — ${pages} pages`), h('p', { class: 'meta dim' }, 'Stamps "N / total" bottom-center in Helvetica 10pt')) : null,
       ErrorText(error),
