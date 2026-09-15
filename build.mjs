@@ -49,4 +49,7 @@ const html = readFileSync('index.html', 'utf8')
   .replace('<script type="module" src="./src/app.js"></script>', () => `<script>\n${bundle}</script>`)
 
 writeFileSync('dist/pdfsuite.html', html)
-console.log('dist/ ready — static site + pdfsuite.html (single-file app, works offline from double-click)')
+// Also write to repo root: it is committed so GitHub Pages serves it and the
+// footer link (./pdfsuite.html) resolves on the live site.
+writeFileSync('pdfsuite.html', html)
+console.log('dist/ + pdfsuite.html ready — static site + single-file app (works offline from double-click)')
