@@ -1,0 +1,1915 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Merge, split, organize and convert PDFs — free, open source, zero dependencies, 100% client-side. Your files never leave your browser." />
+    <style>
+:root {
+  color-scheme: dark;
+  --bg: #09090b;
+  --card: #131316;
+  --border: #27272a;
+  --text: #f4f4f5;
+  --dim: #a1a1aa;
+  --faint: #71717b;
+  --accent: #34d399;
+  --accent-hover: #6ee7b7;
+  --danger: #f87171;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+::selection { background: rgba(52, 211, 153, 0.3); }
+
+#app { max-width: 960px; margin: 0 auto; padding: 0 16px 64px; min-height: 100vh; display: flex; flex-direction: column; }
+
+/* header */
+header { display: flex; justify-content: space-between; align-items: center; padding: 20px 0; border-bottom: 1px solid var(--border); }
+.brand { text-decoration: none; color: var(--text); display: flex; align-items: baseline; gap: 10px; }
+.brand b { font-size: 20px; letter-spacing: -0.02em; font-weight: 700; }
+.accent { color: var(--accent); }
+.tagline { font-size: 12px; color: var(--faint); }
+.gh { color: var(--dim); }
+.gh:hover { color: var(--text); }
+.icon { width: 20px; height: 20px; }
+.icon-lg { width: 28px; height: 28px; }
+.icon-sm { width: 14px; height: 14px; }
+.dim { color: var(--faint); }
+
+/* home */
+main { padding-top: 36px; }
+h1 { font-size: 30px; line-height: 1.2; letter-spacing: -0.02em; margin: 0 0 10px; max-width: 640px; }
+.sub { color: var(--dim); display: flex; align-items: center; gap: 8px; margin: 0 0 30px; font-size: 14px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
+.toolcard {
+  display: block; padding: 20px; border: 1px solid var(--border); border-radius: 12px;
+  background: var(--card); text-decoration: none; color: var(--text); transition: border-color 0.15s;
+}
+.toolcard:hover { border-color: var(--accent); }
+.toolcard h2 { font-size: 16px; margin: 12px 0 4px; }
+.toolcard p { font-size: 13px; color: var(--dim); margin: 0; }
+
+/* tool view */
+.back { color: var(--dim); font-size: 13px; text-decoration: none; }
+.back:hover { color: var(--text); }
+main h1 { font-size: 24px; margin-top: 14px; }
+.tool { display: flex; flex-direction: column; gap: 14px; }
+
+/* dropzone */
+.dropzone {
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  padding: 36px; border: 2px dashed var(--border); border-radius: 12px;
+  background: rgba(19, 19, 22, 0.5); color: var(--dim); cursor: pointer; transition: all 0.15s;
+  text-align: center;
+}
+.dropzone:hover { border-color: var(--faint); }
+.dropzone.over { border-color: var(--accent); background: rgba(52, 211, 153, 0.08); }
+.dz-text em { color: var(--accent); font-style: normal; }
+.hidden-input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+
+/* cards + lists */
+.card { border: 1px solid var(--border); border-radius: 12px; background: var(--card); padding: 14px 16px; }
+.filelist { list-style: none; margin: 0; padding: 0; }
+.filelist li { display: flex; align-items: center; gap: 8px; padding: 7px 4px; border-bottom: 1px solid var(--border); }
+.filelist li:last-child { border-bottom: 0; }
+.idx { width: 20px; text-align: center; color: var(--faint); font-size: 12px; }
+.fname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+.fsize { color: var(--faint); font-size: 12px; }
+.iconbtn { background: none; border: 0; color: var(--dim); padding: 4px; border-radius: 6px; cursor: pointer; }
+.iconbtn:hover { background: #2e2e33; color: var(--text); }
+.iconbtn:disabled { opacity: 0.3; cursor: default; }
+
+/* inputs */
+.lbl { display: block; font-size: 12px; color: var(--faint); margin-bottom: 4px; }
+.textin {
+  width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--bg); color: var(--text); font: inherit; outline: none; margin-bottom: 10px;
+}
+.textin:focus { border-color: var(--accent); }
+.radio-row { display: flex; gap: 18px; font-size: 14px; }
+.radio { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.meta { color: var(--dim); font-size: 14px; margin: 0; }
+.meta b { color: var(--text); }
+
+/* buttons */
+.btn {
+  align-self: flex-start; padding: 10px 18px; border: 0; border-radius: 10px;
+  background: var(--accent); color: #052e22; font-weight: 600; font-size: 14px; cursor: pointer;
+}
+.btn:hover { background: var(--accent-hover); }
+.btn:disabled { opacity: 0.4; cursor: default; }
+.error { color: var(--danger); font-size: 14px; margin: 0; }
+
+/* page grid (organize) */
+.pgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
+.pcard {
+  border: 1px solid var(--border); border-radius: 10px; background: var(--card);
+  padding: 14px 10px 8px; text-align: center; cursor: grab; transition: all 0.12s; user-select: none;
+}
+.pcard.target { border-color: var(--accent); transform: scale(1.03); }
+.pcard.deleted { opacity: 0.35; }
+.pnum { font-size: 15px; font-weight: 600; }
+.pdim { font-size: 11px; color: var(--faint); margin-top: 2px; }
+.prot { font-size: 11px; color: var(--accent); margin-top: 2px; }
+.pops { display: flex; justify-content: center; gap: 4px; margin-top: 8px; opacity: 0; transition: opacity 0.15s; }
+.pcard:hover .pops { opacity: 1; }
+
+/* footer */
+footer { margin-top: auto; padding-top: 60px; }
+footer p { border-top: 1px solid var(--border); padding-top: 20px; color: var(--faint); font-size: 12px; }
+footer em { color: var(--dim); }
+</style>
+    <title>PDFSuite — free PDF tools, no uploads, zero deps</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script>
+
+// ---- src/pdf/types.js ----
+// PDF value model — tagged constructors + predicates.
+// dict = Map<string, value>, array = Array<value>, number/bool/null = raw JS.
+
+const name = (v) => ({ k: 'n', v })
+const ref = (n, g = 0) => ({ k: 'r', n, g })
+const str = (bytes) => ({ k: 's', bytes }) // literal string, raw bytes
+const hex = (bytes) => ({ k: 'x', bytes }) // hex string
+const stream = (dict, data) => ({ k: 't', dict, data }) // dict: Map
+
+const isName = (v) => v?.k === 'n'
+const isRef = (v) => v?.k === 'r'
+const isStr = (v) => v?.k === 's'
+const isHex = (v) => v?.k === 'x'
+const isStream = (v) => v?.k === 't'
+const isDict = (v) => v instanceof Map
+
+const te = new TextEncoder()
+const td = new TextDecoder('latin1')
+const enc = (s) => te.encode(s)
+const dec = (b) => td.decode(b)
+
+/** Get dict value by key name (with or without leading slash). */
+function get(dict, key) {
+  if (!(dict instanceof Map)) return undefined
+  return dict.get(key.replace(/^\//, ''))
+}
+
+/** Set dict value; returns the dict for chaining. */
+function set(dict, key, value) {
+  dict.set(key.replace(/^\//, ''), value)
+  return dict
+}
+
+/** Type check helper: dict entry /Type matches name. */
+function typeIs(dict, typeName) {
+  const t = get(dict, 'Type')
+  return isName(t) && t.v === typeName
+}
+
+// ---------- serialization ----------
+
+const NAME_SPECIAL = /[^A-Za-z0-9_+\-.]/
+function serName(s) {
+  let out = '/'
+  for (const ch of s) {
+    const c = ch.codePointAt(0)
+    out += NAME_SPECIAL.test(ch) ? '#' + c.toString(16).toUpperCase().padStart(2, '0') : ch
+  }
+  return out
+}
+
+function serStr(bytes) {
+  const parts = []
+  for (const b of bytes) {
+    if (b === 0x28 || b === 0x29 || b === 0x5c) parts.push(0x5c, b) // ( ) \
+    else parts.push(b)
+  }
+  const out = new Uint8Array(parts.length + 2)
+  out[0] = 0x28
+  out.set(parts, 1)
+  out[out.length - 1] = 0x29
+  return out
+}
+
+const toHex = (bytes) => [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('')
+
+function serNum(n) {
+  if (Number.isInteger(n)) return String(n)
+  let s = n.toFixed(6)
+  s = s.replace(/\.?0+$/, '')
+  return s === '-0' || s === '' ? '0' : s
+}
+
+/** Serialize a value to PDF syntax. Returns Uint8Array[] chunks. */
+function serialize(v) {
+  if (v === null || v === undefined) return [enc('null')]
+  if (typeof v === 'boolean') return [enc(v ? 'true' : 'false')]
+  if (typeof v === 'number') return [enc(serNum(v))]
+  if (v instanceof Map) {
+    const parts = [enc('<<')]
+    for (const [k, val] of v) parts.push(enc(' ' + serName(k) + ' '), ...serialize(val))
+    parts.push(enc('>>'))
+    return parts
+  }
+  if (Array.isArray(v)) {
+    const parts = [enc('[')]
+    v.forEach((item, i) => parts.push(enc(i ? ' ' : ''), ...serialize(item)))
+    parts.push(enc(']'))
+    return parts
+  }
+  switch (v.k) {
+    case 'n': return [enc(serName(v.v))]
+    case 'r': return [enc(`${v.n} ${v.g} R`)]
+    case 's': return [serStr(v.bytes)]
+    case 'x': return [enc('<' + toHex(v.bytes) + '>')]
+    case 't': {
+      v.dict.set('Length', v.data.length)
+      return [...serialize(v.dict), enc('\nstream\n'), v.data, enc('\nendstream')]
+    }
+    default:
+      throw new Error('cannot serialize value: ' + JSON.stringify(v).slice(0, 80))
+  }
+}
+
+function concat(parts) {
+  const total = parts.reduce((n, p) => n + p.length, 0)
+  const out = new Uint8Array(total)
+  let o = 0
+  for (const p of parts) {
+    out.set(p, o)
+    o += p.length
+  }
+  return out
+}
+
+// ---- src/pdf/env.js ----
+// Environment-neutral inflate (FlateDecode). Node → zlib; browser → DecompressionStream.
+
+async function inflate(data) {
+  if (typeof process !== 'undefined' && process.versions?.node) {
+    const { inflateSync } = await import('node:zlib')
+    return new Uint8Array(inflateSync(data))
+  }
+  const out = await inflateRaw(data, 'deflate').catch(() => inflateRaw(data, 'deflate-raw'))
+  if (!out) throw new Error('inflate failed')
+  return out
+}
+
+async function inflateRaw(data, format) {
+  const ds = new DecompressionStream(format)
+  const stream = new Blob([data]).stream().pipeThrough(ds)
+  return new Uint8Array(await new Response(stream).arrayBuffer())
+}
+
+// ---- src/pdf/parse.js ----
+
+const WS = new Set([0x00, 0x09, 0x0a, 0x0c, 0x0d, 0x20])
+const DELIM = new Set([0x28, 0x29, 0x3c, 0x3e, 0x5b, 0x5d, 0x7b, 0x7d, 0x2f, 0x25])
+const isWs = (b) => WS.has(b)
+const isDelim = (b) => isWs(b) || DELIM.has(b)
+const isDigit = (b) => b >= 0x30 && b <= 0x39
+
+function skipWs(buf, i) {
+  while (i < buf.length) {
+    if (isWs(buf[i])) i++
+    else if (buf[i] === 0x25) {
+      while (i < buf.length && buf[i] !== 0x0a && buf[i] !== 0x0d) i++ // % comment → EOL
+    } else break
+  }
+  return i
+}
+
+function matchKeyword(buf, i, kw) {
+  for (let j = 0; j < kw.length; j++) if (buf[i + j] !== kw.charCodeAt(j)) return false
+  return true
+}
+
+/** Parse one PDF value at buf[i]. Returns [value, nextIndex]. */
+function parseValue(buf, i, allowStream = false) {
+  i = skipWs(buf, i)
+  const b = buf[i]
+
+  if (b === 0x3c) {
+    // << dict >> or <hex>
+    if (buf[i + 1] === 0x3c) {
+      const dict = new Map()
+      i += 2
+      while (true) {
+        i = skipWs(buf, i)
+        if (buf[i] === 0x3e && buf[i + 1] === 0x3e) {
+          i += 2
+          break
+        }
+        if (buf[i] !== 0x2f) throw new Error(`dict: expected /key @${i}`)
+        let keyEnd = i + 1
+        while (keyEnd < buf.length && !isDelim(buf[keyEnd])) keyEnd++
+        const key = decodeName(buf, i + 1, keyEnd)
+        const [val, next] = parseValue(buf, keyEnd)
+        dict.set(key, val)
+        i = next
+      }
+      // top-level only: stream data may follow a dict
+      if (allowStream) {
+        const j = skipWs(buf, i)
+        if (matchKeyword(buf, j, 'stream') && isDelim(buf[j + 6])) {
+          let d = j + 6
+          if (buf[d] === 0x0d && buf[d + 1] === 0x0a) d += 2
+          else if (buf[d] === 0x0d || buf[d] === 0x0a) d += 1
+          const len = get(dict, 'Length')
+          let data
+          if (typeof len === 'number' && len >= 0 && d + len <= buf.length) {
+            data = buf.slice(d, d + len)
+            i = d + len
+            const e = skipWs(buf, i)
+            if (matchKeyword(buf, e, 'endstream')) i = e + 9
+          } else {
+            const end = findMarker(buf, d, 'endstream')
+            data = buf.slice(d, end)
+            i = end + 9
+          }
+          return [stream(dict, data), i]
+        }
+      }
+      return [dict, i]
+    }
+    // hex string
+    let j = i + 1
+    const nib = []
+    while (j < buf.length && buf[j] !== 0x3e) {
+      const c = buf[j]
+      if (!isWs(c)) nib.push(c)
+      j++
+    }
+    if (nib.length % 2) nib.push(0x30)
+    const out = new Uint8Array(nib.length / 2)
+    for (let k = 0; k < out.length; k++)
+      out[k] = parseInt(String.fromCharCode(nib[2 * k], nib[2 * k + 1]), 16)
+    return [hex(out), j + 1]
+  }
+
+  if (b === 0x5b) {
+    const arr = []
+    i++
+    while (true) {
+      i = skipWs(buf, i)
+      if (buf[i] === 0x5d) return [arr, i + 1]
+      const [v, next] = parseValue(buf, i)
+      arr.push(v)
+      i = next
+    }
+  }
+
+  if (b === 0x2f) {
+    let j = i + 1
+    while (j < buf.length && !isDelim(buf[j])) j++
+    return [name(decodeName(buf, i + 1, j)), j]
+  }
+
+  if (b === 0x28) {
+    // literal string — escapes + balanced parens
+    const out = []
+    let j = i + 1
+    let depth = 1
+    while (j < buf.length && depth > 0) {
+      const c = buf[j]
+      if (c === 0x5c) {
+        const e = buf[j + 1]
+        j += 2
+        switch (e) {
+          case 0x6e: out.push(0x0a); break
+          case 0x72: out.push(0x0d); break
+          case 0x74: out.push(0x09); break
+          case 0x62: out.push(0x08); break
+          case 0x66: out.push(0x0c); break
+          case 0x28: case 0x29: case 0x5c: out.push(e); break
+          case 0x0d: if (buf[j] === 0x0a) j++; break
+          case 0x0a: break
+          default:
+            if (isDigit(e)) {
+              let oct = e - 0x30, cnt = 1
+              while (cnt < 3 && isDigit(buf[j])) { oct = oct * 8 + (buf[j] - 0x30); j++; cnt++ }
+              out.push(oct & 0xff)
+            } else if (e !== undefined) out.push(e)
+        }
+      } else if (c === 0x28) { depth++; out.push(c); j++ }
+      else if (c === 0x29) { if (--depth > 0) out.push(c); j++ }
+      else { out.push(c); j++ }
+    }
+    return [str(new Uint8Array(out)), j]
+  }
+
+  // number / ref / keyword
+  const start = i
+  let j = i
+  if (buf[j] === 0x2b || buf[j] === 0x2d) j++
+  let sawDot = false
+  while (j < buf.length && (isDigit(buf[j]) || (buf[j] === 0x2e && !sawDot))) {
+    if (buf[j] === 0x2e) sawDot = true
+    j++
+  }
+  if (j > start && (isDigit(buf[j - 1]) || isDigit(buf[start]))) {
+    const numStr = dec(buf.slice(start, j))
+    const num = parseFloat(numStr)
+    if (Number.isInteger(num) && !numStr.includes('.')) {
+      // maybe "n g R"
+      let k = skipWs(buf, j)
+      const s2 = k
+      while (k < buf.length && isDigit(buf[k])) k++
+      if (k > s2) {
+        const g = parseInt(dec(buf.slice(s2, k)), 10)
+        const k2 = skipWs(buf, k)
+        if (buf[k2] === 0x52 && isDelim(buf[k2 + 1])) return [ref(num, g), k2 + 1]
+      }
+    }
+    return [num, j]
+  }
+
+  // keyword
+  let k = i
+  while (k < buf.length && !isDelim(buf[k])) k++
+  const word = dec(buf.slice(i, k))
+  if (word === 'true') return [true, k]
+  if (word === 'false') return [false, k]
+  if (word === 'null') return [null, k]
+  throw new Error(`unexpected token "${word}" @${i}`)
+}
+
+function decodeName(buf, i, j) {
+  let s = ''
+  while (i < j) {
+    if (buf[i] === 0x23 && i + 2 < j) {
+      // #XX
+      const hv = parseInt(dec(buf.slice(i + 1, i + 3)), 16)
+      if (!Number.isNaN(hv)) { s += String.fromCharCode(hv); i += 3; continue }
+    }
+    s += String.fromCharCode(buf[i++])
+  }
+  return s
+}
+
+function findMarker(buf, from, marker) {
+  const m = marker
+  outer: for (let i = from; i <= buf.length - m.length; i++) {
+    for (let j = 0; j < m.length; j++) if (buf[i + j] !== m.charCodeAt(j)) continue outer
+    // strip the EOL that precedes the marker (not part of stream data)
+    let end = i
+    if (buf[end - 1] === 0x0a) end--
+    if (buf[end - 1] === 0x0d) end--
+    return end
+  }
+  return buf.length
+}
+
+const OBJ_RE = /(\d+)\s+(\d+)\s+obj\b/g
+
+/**
+ * Parse a PDF by scanning for indirect objects — ignores xref tables entirely,
+ * so linearized / damaged / xref-stream files all parse the same.
+ */
+async function parsePdf(bytes, warnings = []) {
+  const text = dec(bytes)
+  const objects = new Map()
+
+  for (const m of text.matchAll(OBJ_RE)) {
+    const n = +m[1]
+    const g = +m[2]
+    const start = m.index + m[0].length
+    try {
+      const [v, next] = parseValue(bytes, start, true)
+      const e = skipWs(bytes, next)
+      if (!matchKeyword(bytes, e, 'endobj')) continue // not a real object boundary
+      objects.set(`${n} ${g}`, { n, g, v })
+    } catch {
+      // false-positive match inside stream data — skip
+    }
+  }
+
+  // objects hidden inside /ObjStm compressed streams
+  for (const { v } of objects.values()) {
+    if (!isStream(v) || !typeIs(v.dict, 'ObjStm')) continue
+    const N = get(v.dict, 'N')
+    const first = get(v.dict, 'First')
+    if (typeof N !== 'number' || typeof first !== 'number') continue
+    try {
+      const data = await inflate(v.data)
+      const headerEnd = first
+      const header = dec(data.slice(0, headerEnd)).trim().split(/\s+/).map(Number)
+      for (let i = 0; i < N; i++) {
+        const num = header[i * 2]
+        const off = header[i * 2 + 1]
+        try {
+          const [v2] = parseValue(data, first + off)
+          if (!objects.has(`${num} 0`)) objects.set(`${num} 0`, { n: num, g: 0, v: v2 })
+        } catch { warnings.push(`ObjStm: bad object ${num}`) }
+      }
+    } catch { warnings.push('ObjStm: inflate failed — document may be incomplete') }
+  }
+
+  // trailer: classic `trailer` dict, or an /XRef stream dict
+  let trailer = null
+  const tIdx = text.lastIndexOf('trailer')
+  if (tIdx !== -1) {
+    try { const [t] = parseValue(bytes, skipWs(bytes, tIdx + 7)); trailer = t } catch { /* fall through */ }
+  }
+  if (!(trailer instanceof Map)) {
+    for (const { v } of objects.values()) {
+      const dict = isStream(v) ? v.dict : v
+      if (typeIs(dict, 'XRef')) { trailer = dict; break }
+    }
+  }
+  if (!(trailer instanceof Map)) {
+    // last resort: synthesize a trailer pointing at the catalog
+    for (const { n, g, v } of objects.values()) {
+      const dict = isStream(v) ? v.dict : v
+      if (typeIs(dict, 'Catalog')) {
+        trailer = new Map([['Root', ref(n, g)]])
+        break
+      }
+    }
+  }
+  if (!trailer) throw new Error('not a PDF (no trailer/catalog found)')
+  if (get(trailer, 'Encrypt')) throw new Error('encrypted PDFs are not supported')
+
+  return { objects, trailer, warnings }
+}
+
+/** Resolve a value: refs are dereferenced, everything else returned as-is. */
+function deref(doc, v) {
+  if (v?.k === 'r') return doc.objects.get(`${v.n} ${v.g}`)?.v
+  return v
+}
+
+// ---- src/pdf/write.js ----
+
+/** A document under construction: numbered objects + allocator. */
+function newDoc() {
+  return {
+    objects: new Map(), // num → value
+    _next: 1,
+    alloc() {
+      return this._next++
+    },
+    set(num, v) {
+      this.objects.set(num, v)
+    },
+  }
+}
+
+/** Serialize a built doc to PDF bytes: header, objects, classic xref, trailer. */
+function writeDoc(doc, rootNum) {
+  const parts = [enc('%PDF-1.7\n%\xe2\xe3\xcf\xd3\n')]
+  const offsets = new Map()
+
+  const nums = [...doc.objects.keys()].sort((a, b) => a - b)
+  for (const n of nums) {
+    offsets.set(n, parts.reduce((s, p) => s + p.length, 0))
+    parts.push(enc(`${n} 0 obj\n`), ...serialize(doc.objects.get(n)), enc('\nendobj\n'))
+  }
+
+  const xrefAt = parts.reduce((s, p) => s + p.length, 0)
+  const count = nums.length ? nums[nums.length - 1] + 1 : 1
+  let xref = 'xref\n0 ' + count + '\n0000000000 65535 f \r\n'
+  for (let n = 1; n < count; n++) {
+    const off = offsets.get(n)
+    xref += off === undefined ? '0000000000 65535 f \r\n' : String(off).padStart(10, '0') + ' 00000 n \r\n'
+  }
+  parts.push(
+    enc(xref),
+    enc(`trailer\n<< /Size ${count} /Root ${rootNum} 0 R >>\nstartxref\n${xrefAt}\n%%EOF\n`),
+  )
+  return concat(parts)
+}
+
+// ---- src/zip.js ----
+// Minimal ZIP writer — STORE method (no compression), enough for download bundles.
+
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256)
+  for (let n = 0; n < 256; n++) {
+    let c = n
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1
+    t[n] = c >>> 0
+  }
+  return t
+})()
+
+function crc32(data, crc = 0xffffffff) {
+  for (let i = 0; i < data.length; i++) crc = CRC_TABLE[(crc ^ data[i]) & 0xff] ^ (crc >>> 8)
+  return (crc ^ 0xffffffff) >>> 0
+}
+
+const zte = new TextEncoder() // named uniquely — single-file build shares one scope
+
+/** files: [{name: string, data: Uint8Array}] → zip bytes */
+function zipStore(files) {
+  const chunks = []
+  const central = []
+  let offset = 0
+
+  const u16 = (n) => new Uint8Array([n & 0xff, (n >> 8) & 0xff])
+  const u32 = (n) => new Uint8Array([n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff, (n >>> 24) & 0xff])
+
+  for (const f of files) {
+    const nameBytes = zte.encode(f.name)
+    const crc = crc32(f.data)
+    const local = [
+      u32(0x04034b50), u16(20), u16(0x0800), u16(0), u16(0), u16(0), // sig, ver, utf8 flag, method, time, date
+      u32(crc), u32(f.data.length), u32(f.data.length),
+      u16(nameBytes.length), u16(0), nameBytes,
+    ]
+    chunks.push(...local, f.data)
+    central.push({ nameBytes, crc, size: f.data.length, offset })
+    offset += local.reduce((n, c) => n + c.length, 0) + f.data.length
+  }
+
+  const cdStart = offset
+  for (const c of central) {
+    const rec = [
+      u32(0x02014b50), u16(20), u16(20), u16(0x0800), u16(0), u16(0), u16(0),
+      u32(c.crc), u32(c.size), u32(c.size),
+      u16(c.nameBytes.length), u16(0), u16(0), u16(0), u16(0),
+      u32(0), u32(c.offset), c.nameBytes,
+    ]
+    chunks.push(...rec)
+    offset += rec.reduce((n, x) => n + x.length, 0)
+  }
+  const cdSize = offset - cdStart
+
+  chunks.push(
+    u32(0x06054b50), u16(0), u16(0), u16(files.length), u16(files.length),
+    u32(cdSize), u32(cdStart), u16(0),
+  )
+
+  const out = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0))
+  let o = 0
+  for (const c of chunks) { out.set(c, o); o += c.length }
+  return out
+}
+
+// ---- src/png.js ----
+// Minimal PNG encoder — truecolor/gray 8-bit, zlib stream with STORED deflate
+// blocks (no compression, but valid). Enough to export decoded PDF rasters.
+
+function adler32(data) {
+  let a = 1, b = 0
+  for (let i = 0; i < data.length; i++) {
+    a = (a + data[i]) % 65521
+    b = (b + a) % 65521
+  }
+  return ((b << 16) | a) >>> 0
+}
+
+/** Wrap raw bytes in a zlib stream using uncompressed deflate blocks. */
+function zlibStore(data) {
+  const nBlocks = Math.max(1, Math.ceil(data.length / 65535))
+  const out = new Uint8Array(2 + data.length + nBlocks * 5 + 4)
+  let o = 0
+  out[o++] = 0x78
+  out[o++] = 0x01
+  for (let i = 0; i < nBlocks; i++) {
+    const chunk = data.subarray(i * 65535, (i + 1) * 65535)
+    const last = i === nBlocks - 1
+    out[o++] = last ? 1 : 0
+    out[o++] = chunk.length & 0xff
+    out[o++] = (chunk.length >> 8) & 0xff
+    out[o++] = ~chunk.length & 0xff
+    out[o++] = (~chunk.length >> 8) & 0xff
+    out.set(chunk, o)
+    o += chunk.length
+  }
+  const adler = adler32(data)
+  out[o++] = (adler >>> 24) & 0xff
+  out[o++] = (adler >>> 16) & 0xff
+  out[o++] = (adler >>> 8) & 0xff
+  out[o++] = adler & 0xff
+  return out.subarray(0, o)
+}
+
+/** pixels: Uint8Array of RGB or grayscale samples. gray=true → 1 byte/px, else 3. */
+function pngEncode(width, height, pixels, gray = false) {
+  const bpp = gray ? 1 : 3
+  const stride = width * bpp
+  if (pixels.length !== stride * height) throw new Error('pixel buffer size mismatch')
+
+  const scan = new Uint8Array((stride + 1) * height)
+  for (let y = 0; y < height; y++) {
+    scan[y * (stride + 1)] = 0 // filter: none
+    scan.set(pixels.subarray(y * stride, (y + 1) * stride), y * (stride + 1) + 1)
+  }
+
+  const chunk = (type, data) => {
+    const t = new TextEncoder().encode(type)
+    const len = new Uint8Array(4)
+    new DataView(len.buffer).setUint32(0, data.length)
+    const body = new Uint8Array(t.length + data.length)
+    body.set(t)
+    body.set(data, t.length)
+    const crc = new Uint8Array(4)
+    new DataView(crc.buffer).setUint32(0, crc32(body))
+    const out = new Uint8Array(4 + body.length + 4)
+    out.set(len, 0)
+    out.set(body, 4)
+    out.set(crc, 4 + body.length)
+    return out
+  }
+
+  const ihdr = new Uint8Array(13)
+  const dv = new DataView(ihdr.buffer)
+  dv.setUint32(0, width)
+  dv.setUint32(4, height)
+  ihdr[8] = 8 // bit depth
+  ihdr[9] = gray ? 0 : 2 // color type
+  // compression/filter/interlace = 0
+
+  const sig = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+  const parts = [sig, chunk('IHDR', ihdr), chunk('IDAT', zlibStore(scan)), chunk('IEND', new Uint8Array(0))]
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0))
+  let o = 0
+  for (const p of parts) { out.set(p, o); o += p.length }
+  return out
+}
+
+// ---- src/pdf/ops.js ----
+
+const INHERITED = ['Resources', 'MediaBox', 'CropBox', 'Rotate']
+
+/** Walk the page tree → ordered leaves with resolved inherited attributes. */
+function pageLeaves(doc) {
+  const root = deref(doc, get(doc.trailer, 'Root'))
+  const catalog = isStream(root) ? root.dict : root
+  const pagesRef = get(catalog, 'Pages')
+  if (!isRef(pagesRef)) throw new Error('no /Pages in catalog')
+  const leaves = []
+  const seen = new Set()
+
+  const walk = (nodeRef, inh) => {
+    const key = nodeRef.n + ' ' + nodeRef.g
+    if (seen.has(key)) return
+    seen.add(key)
+    const node = deref(doc, nodeRef)
+    const dict = isStream(node) ? node.dict : node
+    if (!(dict instanceof Map)) return
+    const cur = { ...inh }
+    for (const k of INHERITED) {
+      const v = get(dict, k)
+      if (v !== undefined) cur[k] = v
+    }
+    if (typeIs(dict, 'Page')) leaves.push({ ref: nodeRef, dict, inh: cur })
+    else {
+      const kidsArr = deref(doc, get(dict, 'Kids'))
+      if (Array.isArray(kidsArr)) for (const kid of kidsArr) if (isRef(kid)) walk(kid, cur)
+    }
+  }
+  walk(pagesRef, {})
+  if (!leaves.length) throw new Error('PDF has no pages')
+  return leaves
+}
+
+async function pageCount(bytes) {
+  return pageLeaves(await parsePdf(bytes)).length
+}
+
+/** Deep-copy a value across docs, remapping refs. */
+function copyValue(v, src, dst, refMap) {
+  if (isRef(v)) {
+    const key = `${v.n} ${v.g}`
+    if (refMap.has(key)) return refMap.get(key)
+    const newNum = dst.alloc()
+    const out = ref(newNum, 0)
+    refMap.set(key, out)
+    const srcVal = src.objects.get(key)?.v
+    if (srcVal === undefined) return null // dangling ref → drop it
+    dst.set(newNum, copyValue(srcVal, src, dst, refMap))
+    return out
+  }
+  if (v instanceof Map) {
+    const m = new Map()
+    for (const [k, val] of v) m.set(k, copyValue(val, src, dst, refMap))
+    return m
+  }
+  if (Array.isArray(v)) return v.map((x) => copyValue(x, src, dst, refMap))
+  if (isStream(v)) return stream(copyValue(v.dict, src, dst, refMap), v.data.slice())
+  return v
+}
+
+/**
+ * Append selected pages of `srcDoc` into `dst` under `pagesRef`.
+ * `picks` = [{leaf, rotateDelta}] — leaves already walked (source order preserved by caller).
+ */
+function appendPages(srcDoc, picks, dst, pagesRef, kids) {
+  const refMap = new Map()
+  for (const { leaf, rotateDelta } of picks) {
+    const num = dst.alloc()
+    kids.push(ref(num, 0))
+    const pageDict = new Map()
+    for (const k of INHERITED) {
+      const v = get(leaf.dict, k) ?? leaf.inh[k]
+      if (v !== undefined) pageDict.set(k, copyValue(v, srcDoc, dst, refMap))
+    }
+    for (const [k, val] of leaf.dict) {
+      if (k === 'Parent' || k === 'Metadata' || INHERITED.includes(k)) continue
+      pageDict.set(k, copyValue(val, srcDoc, dst, refMap))
+    }
+    pageDict.set('Type', name('Page'))
+    pageDict.set('Parent', ref(pagesRef, 0))
+    if (rotateDelta) {
+      const cur = get(pageDict, 'Rotate')
+      const base = typeof cur === 'number' ? cur : 0
+      pageDict.set('Rotate', ((base + rotateDelta) % 360 + 360) % 360)
+    }
+    dst.set(num, pageDict)
+  }
+}
+
+function finishDoc(dst, pagesRef, kids) {
+  dst.set(pagesRef, new Map([
+    ['Type', name('Pages')],
+    ['Kids', kids],
+    ['Count', kids.length],
+  ]))
+  const catNum = dst.alloc()
+  dst.set(catNum, new Map([
+    ['Type', name('Catalog')],
+    ['Pages', ref(pagesRef, 0)],
+  ]))
+  return writeDoc(dst, catNum)
+}
+
+/** Merge several PDFs (Uint8Array[]) into one, in order. */
+async function mergePdfs(inputs) {
+  const dst = newDoc()
+  const pagesRef = dst.alloc()
+  const kids = []
+  for (const bytes of inputs) {
+    const doc = await parsePdf(bytes)
+    appendPages(doc, pageLeaves(doc).map((leaf) => ({ leaf, rotateDelta: 0 })), dst, pagesRef, kids)
+  }
+  return finishDoc(dst, pagesRef, kids)
+}
+
+/**
+ * Rebuild a PDF from an ordered op list (1-based source pages):
+ * reorder by list order, delete by omission, rotate via `rotation` delta.
+ */
+async function organizePages(bytes, ops) {
+  const src = await parsePdf(bytes)
+  const leaves = pageLeaves(src)
+  const picks = ops.map((o) => {
+    if (o.page < 1 || o.page > leaves.length) throw new Error(`page ${o.page} out of range`)
+    return { leaf: leaves[o.page - 1], rotateDelta: o.rotation || 0 }
+  })
+  const dst = newDoc()
+  const pagesRef = dst.alloc()
+  const kids = []
+  appendPages(src, picks, dst, pagesRef, kids)
+  return finishDoc(dst, pagesRef, kids)
+}
+
+/** Extract page ranges (1-based inclusive {from,to}) into a single PDF. */
+async function extractPages(bytes, ranges) {
+  const ops = ranges.flatMap(({ from, to }) =>
+    Array.from({ length: to - from + 1 }, (_, i) => ({ page: from + i, rotation: 0 })),
+  )
+  return organizePages(bytes, ops)
+}
+
+/** One output PDF per range. */
+async function splitPdf(bytes, ranges) {
+  return Promise.all(ranges.map((r) => extractPages(bytes, [r])))
+}
+
+/** Parse "1-3, 5, 8-10" into {from,to}[] with bounds checking. */
+function parseRanges(spec, maxPage) {
+  const ranges = []
+  for (const part of spec.split(',')) {
+    const t = part.trim()
+    if (!t) continue
+    const m = /^(\d+)(?:\s*-\s*(\d+))?$/.exec(t)
+    if (!m) throw new Error(`bad range "${t}"`)
+    const from = parseInt(m[1], 10)
+    const to = m[2] ? parseInt(m[2], 10) : from
+    if (from < 1 || to > maxPage || from > to) throw new Error(`range "${t}" out of bounds`)
+    ranges.push({ from, to })
+  }
+  if (!ranges.length) throw new Error('no ranges given')
+  return ranges
+}
+
+// ---------- images → pdf ----------
+
+/** Read dimensions/colorspace from a JPEG's SOF marker. */
+function jpegInfo(buf) {
+  if (buf[0] !== 0xff || buf[1] !== 0xd8) throw new Error('not a JPEG')
+  let i = 2
+  while (i + 3 < buf.length) {
+    if (buf[i] !== 0xff) { i++; continue }
+    const marker = buf[i + 1]
+    if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) { i += 2; continue }
+    const len = (buf[i + 2] << 8) | buf[i + 3]
+    if (marker === 0xda) break // SOS — image data
+    if ([0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf].includes(marker)) {
+      const height = (buf[i + 5] << 8) | buf[i + 6]
+      const width = (buf[i + 7] << 8) | buf[i + 8]
+      const comps = buf[i + 9]
+      const cs = comps === 1 ? 'DeviceGray' : comps === 4 ? 'DeviceCMYK' : 'DeviceRGB'
+      return { width, height, colorSpace: cs }
+    }
+    i += 2 + len
+  }
+  throw new Error('JPEG SOF marker not found')
+}
+
+/** Pack JPEG images into a PDF — one image per page at native size. */
+function imagesToPdf(images) {
+  const dst = newDoc()
+  const pagesRef = dst.alloc()
+  const kids = []
+  for (const img of images) {
+    const { width, height, colorSpace } = jpegInfo(img.data)
+    const imgNum = dst.alloc()
+    dst.set(imgNum, stream(new Map([
+      ['Type', name('XObject')],
+      ['Subtype', name('Image')],
+      ['Width', width],
+      ['Height', height],
+      ['ColorSpace', name(colorSpace)],
+      ['BitsPerComponent', 8],
+      ['Filter', name('DCTDecode')],
+      ['Length', img.data.length],
+    ]), img.data))
+    const csNum = dst.alloc()
+    dst.set(csNum, stream(new Map(), new TextEncoder().encode(`q ${width} 0 0 ${height} 0 0 cm /Im0 Do Q`)))
+    const pageNum = dst.alloc()
+    dst.set(pageNum, new Map([
+      ['Type', name('Page')],
+      ['Parent', ref(pagesRef, 0)],
+      ['MediaBox', [0, 0, width, height]],
+      ['Resources', new Map([['XObject', new Map([['Im0', ref(imgNum, 0)]])]])],
+      ['Contents', ref(csNum, 0)],
+    ]))
+    kids.push(ref(pageNum, 0))
+  }
+  return finishDoc(dst, pagesRef, kids)
+}
+
+// ---------- page numbers ----------
+
+/** Escape a JS string into PDF literal-string bytes (ASCII only). */
+const pdfStr = (s) => '(' + s.replace(/[\\()]/g, (c) => '\\' + c) + ')'
+
+/**
+ * Stamp "N / total" centered at the bottom of every page.
+ * Appends a content stream ON TOP of existing content and injects a
+ * Helvetica base-14 font under an unlikely-colliding resource name.
+ */
+async function addPageNumbers(bytes) {
+  const src = await parsePdf(bytes)
+  const leaves = pageLeaves(src)
+  const total = leaves.length
+  const fontResName = 'PDFFnt1'
+
+  const dst = newDoc()
+  const pagesRef = dst.alloc()
+  const kids = []
+  const refMap = new Map()
+
+  for (let i = 0; i < leaves.length; i++) {
+    const { leaf } = { leaf: leaves[i] }
+    const num = dst.alloc()
+    kids.push(ref(num, 0))
+    const pageDict = new Map()
+    for (const k of INHERITED) {
+      const v = get(leaf.dict, k) ?? leaf.inh[k]
+      if (v !== undefined) pageDict.set(k, copyValue(v, src, dst, refMap))
+    }
+    for (const [k, val] of leaf.dict) {
+      if (k === 'Parent' || k === 'Metadata' || INHERITED.includes(k)) continue
+      pageDict.set(k, copyValue(val, src, dst, refMap))
+    }
+    pageDict.set('Type', name('Page'))
+    pageDict.set('Parent', ref(pagesRef, 0))
+
+    // label stream: "i+1 / total" centered on the MediaBox width
+    const mb = pageDict.get('MediaBox') ?? [0, 0, 612, 792]
+    const w = mb[2] - mb[0]
+    const label = `${i + 1} / ${total}`
+    const x = mb[0] + w / 2 - label.length * 2.5 // ~5pt/char at 10pt Helvetica
+    const y = mb[1] + 18
+    const csNum = dst.alloc()
+    dst.set(csNum, stream(new Map(), new TextEncoder().encode(
+      `BT /${fontResName} 10 Tf 0 g ${x.toFixed(1)} ${y.toFixed(1)} Td ${pdfStr(label)} Tj ET`,
+    )))
+
+    // contents = existing contents + ours last (draws on top)
+    const contents = pageDict.get('Contents')
+    const arr = Array.isArray(contents) ? contents.slice() : contents !== undefined ? [contents] : []
+    arr.push(ref(csNum, 0))
+    pageDict.set('Contents', arr.length === 1 ? arr[0] : arr)
+
+    // resources: copy inherited, add our font if slot free
+    let res = pageDict.get('Resources')
+    if (isRef(res)) res = deref(src, res) instanceof Map ? copyValue(deref(src, res), src, dst, refMap) : undefined
+    if (!(res instanceof Map)) res = new Map()
+    let fonts = res.get('Font')
+    if (isRef(fonts)) fonts = copyValue(deref(src, fonts), src, dst, refMap)
+    if (!(fonts instanceof Map)) fonts = new Map()
+    if (!fonts.has(fontResName)) {
+      fonts.set(fontResName, new Map([
+        ['Type', name('Font')],
+        ['Subtype', name('Type1')],
+        ['BaseFont', name('Helvetica')],
+      ]))
+      res.set('Font', fonts)
+    }
+    pageDict.set('Resources', res)
+    dst.set(num, pageDict)
+  }
+  return finishDoc(dst, pagesRef, kids)
+}
+
+/** Rebuild dropping /Info, XMP /Metadata, doc IDs — tracker scrub. */
+async function scrubPdf(bytes) {
+  const src = await parsePdf(bytes)
+  const leaves = pageLeaves(src)
+  const dst = newDoc()
+  const pagesRef = dst.alloc()
+  const kids = []
+  appendPages(src, leaves.map((leaf) => ({ leaf, rotateDelta: 0 })), dst, pagesRef, kids)
+  return finishDoc(dst, pagesRef, kids)
+}
+
+// ---------- extract images ----------
+
+/** Undo PNG/TIFF predictors on inflated image data (DecodeParms). */
+function unPredict(data, { predictor = 1, columns = 1, colors = 1, bpc = 8 }) {
+  if (predictor === 1) return data
+  const bpp = Math.max(1, Math.ceil((colors * bpc) / 8))
+  const rowBytes = Math.ceil((columns * colors * bpc) / 8)
+  if (predictor === 2) {
+    const out = new Uint8Array(data.length)
+    for (let y = 0; y * rowBytes < data.length; y++) {
+      const row = y * rowBytes
+      for (let x = 0; x < rowBytes; x++) {
+        const left = x >= bpp ? out[row + x - bpp] : 0
+        out[row + x] = (data[row + x] + left) & 0xff
+      }
+    }
+    return out
+  }
+  if (predictor < 10 || predictor > 15) throw new Error(`unsupported predictor ${predictor}`)
+  const hasFilterByte = predictor >= 10
+  const rowStride = rowBytes + (hasFilterByte ? 1 : 0)
+  const rows = Math.floor(data.length / rowStride)
+  const out = new Uint8Array(rows * rowBytes)
+  const paeth = (a, b, c) => {
+    const p = a + b - c
+    const pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c)
+    return pa <= pb && pa <= pc ? a : pb <= pc ? b : c
+  }
+  for (let y = 0; y < rows; y++) {
+    const src = y * rowStride + (hasFilterByte ? 1 : 0)
+    const f = hasFilterByte ? data[y * rowStride] : 1 // Optimum → sub? spec: treated as per-row
+    const prev = y > 0 ? (y - 1) * rowBytes : -1
+    for (let x = 0; x < rowBytes; x++) {
+      const a = x >= bpp ? out[y * rowBytes + x - bpp] : 0
+      const b = prev >= 0 ? out[prev + x] : 0
+      const c = x >= bpp && prev >= 0 ? out[prev + x - bpp] : 0
+      let v = data[src + x]
+      if (f === 1) v += a
+      else if (f === 2) v += b
+      else if (f === 3) v += (a + b) >> 1
+      else if (f === 4) v += paeth(a, b, c)
+      out[y * rowBytes + x] = v & 0xff
+    }
+  }
+  return out
+}
+
+/**
+ * Pull embedded images out of a PDF.
+ * Returns { images: [{name, data, w, h}], skipped } — DCTDecode→.jpg,
+ * JPXDecode→.jp2, FlateDecode raw RGB/gray 8-bit→.png, else counted in skipped.
+ */
+async function extractImages(bytes) {
+  const doc = await parsePdf(bytes)
+  const images = []
+  let skipped = 0
+  let i = 0
+  for (const { v } of doc.objects.values()) {
+    if (!isStream(v) || get(v.dict, 'Subtype')?.v !== 'Image') continue
+    i++
+    const w = get(v.dict, 'Width') ?? 0
+    const h = get(v.dict, 'Height') ?? 0
+    let filter = get(v.dict, 'Filter')
+    if (Array.isArray(filter)) filter = filter[filter.length - 1]
+    const f = isName(filter) ? filter.v : null
+    const stem = `image-${i}-${w}x${h}`
+    try {
+      if (f === 'DCTDecode') {
+        images.push({ name: `${stem}.jpg`, data: v.data, w, h })
+      } else if (f === 'JPXDecode') {
+        images.push({ name: `${stem}.jp2`, data: v.data, w, h })
+      } else if (f === 'FlateDecode' || f === null || f === 'Fl') {
+        const bpc = get(v.dict, 'BitsPerComponent') ?? 8
+        let cs = get(v.dict, 'ColorSpace')
+        if (isRef(cs)) cs = deref(doc, cs)
+        const csName = isName(cs) ? cs.v : Array.isArray(cs) && isName(cs[0]) ? cs[0].v : null
+        if (bpc !== 8 || (csName !== 'DeviceRGB' && csName !== 'DeviceGray')) { skipped++; continue }
+        const colors = csName === 'DeviceRGB' ? 3 : 1
+        let raw = f === null ? v.data : await inflate(v.data)
+        const dp = get(v.dict, 'DecodeParms') ?? get(v.dict, 'DP')
+        const parms = dp instanceof Map ? {
+          predictor: get(dp, 'Predictor') ?? 1,
+          columns: get(dp, 'Columns') ?? w,
+          colors: get(dp, 'Colors') ?? colors,
+          bpc: get(dp, 'BitsPerComponent') ?? 8,
+        } : { predictor: 1, columns: w, colors, bpc: 8 }
+        raw = unPredict(raw, parms)
+        if (raw.length !== w * h * colors) { skipped++; continue }
+        images.push({ name: `${stem}.png`, data: pngEncode(w, h, raw, colors === 1), w, h })
+      } else {
+        skipped++
+      }
+    } catch { skipped++ }
+  }
+  return { images, skipped }
+}
+
+// ---- src/ui/dom.js ----
+// Tiny DOM helper — h(tag, attrs, ...children). No framework, no build.
+
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag)
+  for (const [k, v] of Object.entries(attrs ?? {})) {
+    if (v === undefined || v === null) continue
+    if (k === 'class') el.className = v
+    else if (k === 'dataset') Object.assign(el.dataset, v)
+    else if (k === 'style' && typeof v === 'object') Object.assign(el.style, v)
+    else if (k.startsWith('on')) el.addEventListener(k.slice(2).toLowerCase(), v)
+    else if (v === true) el.setAttribute(k, '')
+    else el.setAttribute(k, v)
+  }
+  for (const kid of kids.flat(Infinity)) {
+    if (kid === null || kid === undefined || kid === false) continue
+    el.append(kid?.nodeType ? kid : document.createTextNode(String(kid)))
+  }
+  return el
+}
+
+// Hand-drawn SVG icons (stroke style, 24 viewBox) — zero icon library.
+const ICONS = {
+  upload: 'M12 16V4m0 0 4 4m-4-4-4 4M4 20h16',
+  files: 'M8 3h8l4 4v14H8zM16 3v4h4M4 7v14h12v-3',
+  scissors: 'M6 6l14 12M6 18 20 6M6 6a2 2 0 1 0 .1 0M6 18a2 2 0 1 0 .1 0',
+  grid: 'M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z',
+  image: 'M4 5h16v14H4zM4 15l5-5 4 4 3-3 4 4M9 9.5a1.5 1.5 0 1 0 .1 0',
+  download: 'M12 4v12m0 0 4-4m-4 4-4-4M4 20h16',
+  x: 'M6 6l12 12M18 6 6 18',
+  rotate: 'M20 8A8 8 0 1 0 20 15M20 4v4h-4',
+  undo: 'M8 6 4 10l4 4M4 10h10a6 6 0 0 1 0 12h-2',
+  up: 'M12 19V5m0 0-5 5m5-5 5 5',
+  down: 'M12 5v14m0 0 5-5m-5 5-5-5',
+  github:
+    'M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z',
+  shield: 'M12 3l8 3v6c0 4.5-3.2 7.7-8 9-4.8-1.3-8-4.5-8-9V6zM9 12l2 2 4-4',
+  layers: 'M12 3 2 9l10 6 10-6zM4 12.5 12 17l8-4.5M4 16.5 12 21l8-4.5',
+  hash: 'M9 4 7 20M17 4l-2 16M4 9h17M3 15h17',
+  eraser: 'M7 19h14M9 19 3.5 13.5a2 2 0 0 1 0-2.8l8.2-8.2a2 2 0 0 1 2.8 0l6 6a2 2 0 0 1 0 2.8L13 19',
+}
+
+function icon(name, cls = 'icon') {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+  svg.setAttribute('viewBox', name === 'github' ? '0 0 16 16' : '0 0 24 24')
+  svg.setAttribute('class', cls)
+  const p = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+  p.setAttribute('d', ICONS[name])
+  if (name === 'github') p.setAttribute('fill', 'currentColor')
+  else {
+    p.setAttribute('fill', 'none')
+    p.setAttribute('stroke', 'currentColor')
+    p.setAttribute('stroke-width', '1.8')
+    p.setAttribute('stroke-linecap', 'round')
+    p.setAttribute('stroke-linejoin', 'round')
+  }
+  svg.append(p)
+  return svg
+}
+
+function saveBlob(blob, name) {
+  const url = URL.createObjectURL(blob)
+  const a = h('a', { href: url, download: name })
+  a.click()
+  setTimeout(() => URL.revokeObjectURL(url), 10_000)
+}
+
+const readBytes = async (file) => new Uint8Array(await file.arrayBuffer())
+
+function fmtBytes(n) {
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  return `${(n / 1024 / 1024).toFixed(1)} MB`
+}
+
+// ---- src/ui/widgets.js ----
+
+/**
+ * File drop zone — a <label> wrapping a hidden input, so clicking it opens the
+ * file dialog NATIVELY. Zero JS involved in opening the picker (no recursion
+ * bugs possible). Drag & drop handled separately.
+ */
+function DropZone({ accept, multiple = false, onFiles, label }) {
+  const input = h('input', {
+    type: 'file',
+    accept,
+    multiple: multiple || undefined,
+    class: 'hidden-input',
+    onchange: (e) => {
+      const files = [...e.target.files]
+      if (files.length) onFiles(files)
+      e.target.value = ''
+    },
+  })
+
+  const zone = h(
+    'label',
+    { class: 'dropzone' },
+    input,
+    icon('upload', 'icon-lg dim'),
+    h('span', { class: 'dz-text' }, label ?? `Drop ${multiple ? 'files' : 'a file'} here or `, h('em', {}, 'browse')),
+  )
+
+  zone.addEventListener('dragover', (e) => {
+    e.preventDefault()
+    zone.classList.add('over')
+  })
+  zone.addEventListener('dragleave', () => zone.classList.remove('over'))
+  zone.addEventListener('drop', (e) => {
+    e.preventDefault()
+    zone.classList.remove('over')
+    const files = [...e.dataTransfer.files]
+    if (files.length) onFiles(files)
+  })
+  return zone
+}
+
+/** Ordered file list with move-up/down + remove. Merge / Images→PDF. */
+function FileList({ files, onMove, onRemove }) {
+  return h(
+    'ul',
+    { class: 'filelist' },
+    files.map((f, i) =>
+      h(
+        'li',
+        {},
+        h('span', { class: 'idx' }, String(i + 1)),
+        h('span', { class: 'fname' }, f.name),
+        h('span', { class: 'fsize' }, fmtBytes(f.size)),
+        iconBtn('up', 'Move up', () => onMove(i, i - 1), i === 0),
+        iconBtn('down', 'Move down', () => onMove(i, i + 1), i === files.length - 1),
+        iconBtn('x', 'Remove', () => onRemove(i)),
+      ),
+    ),
+  )
+}
+
+function iconBtn(iconName, title, onclick, disabled = false) {
+  return h(
+    'button',
+    { type: 'button', class: 'iconbtn', title, onclick, disabled: disabled || undefined },
+    icon(iconName, 'icon-sm'),
+  )
+}
+
+/** Primary action button. */
+function Btn(label, { onclick, disabled } = {}) {
+  return h('button', { type: 'button', class: 'btn', onclick, disabled: disabled || undefined }, label)
+}
+
+function Card(...kids) {
+  return h('div', { class: 'card' }, kids)
+}
+
+function ErrorText(msg) {
+  return msg ? h('p', { class: 'error' }, msg) : null
+}
+
+/**
+ * Page-card grid for Organize — drag-reorder, rotate, delete.
+ * items: [{page, w, h, rotation, deleted}] — no renderer needed, cards show real metadata.
+ */
+function PageGrid({ items, onReorder, onRotate, onToggleDelete }) {
+  let dragIdx = null
+  const grid = h('div', { class: 'pgrid' })
+
+  items.forEach((it, i) => {
+    const card = h(
+      'div',
+      {
+        class: 'pcard' + (it.deleted ? ' deleted' : ''),
+        draggable: 'true',
+        ondragstart: () => (dragIdx = i),
+        ondragend: () => {
+          dragIdx = null
+          grid.querySelectorAll('.pcard').forEach((c) => c.classList.remove('target'))
+        },
+        ondragover: (e) => {
+          e.preventDefault()
+          card.classList.add('target')
+        },
+        ondragleave: () => card.classList.remove('target'),
+        ondrop: (e) => {
+          e.preventDefault()
+          card.classList.remove('target')
+          if (dragIdx !== null && dragIdx !== i) onReorder(dragIdx, i)
+        },
+      },
+      h('div', { class: 'pnum' }, `p${it.page}`),
+      h('div', { class: 'pdim' }, `${it.w}×${it.h}`),
+      it.rotation ? h('div', { class: 'prot' }, `${it.rotation}°`) : null,
+      h(
+        'div',
+        { class: 'pops' },
+        iconBtn('rotate', 'Rotate +90°', () => onRotate(i)),
+        iconBtn(it.deleted ? 'undo' : 'x', it.deleted ? 'Restore' : 'Delete', () => onToggleDelete(i)),
+      ),
+    )
+    grid.append(card)
+  })
+  return grid
+}
+
+// ---- src/tools/merge.js ----
+
+function Merge() {
+  let files = []
+  let busy = false
+  let error = ''
+  const root = h('div', { class: 'tool' })
+
+  const move = (from, to) => {
+    const c = [...files]
+    const [x] = c.splice(from, 1)
+    c.splice(to, 0, x)
+    files = c
+    render()
+  }
+
+  const run = async () => {
+    busy = true
+    error = ''
+    render()
+    try {
+      const inputs = await Promise.all(files.map(readBytes))
+      const out = await mergePdfs(inputs)
+      saveBlob(new Blob([out], { type: 'application/pdf' }), 'merged.pdf')
+    } catch (e) {
+      error = e.message || 'merge failed — is every file a valid PDF?'
+    } finally {
+      busy = false
+      render()
+    }
+  }
+
+  function render() {
+    root.replaceChildren(
+      DropZone({
+        accept: 'application/pdf',
+        multiple: true,
+        onFiles: (f) => {
+          files = files.concat(f)
+          render()
+        },
+      }),
+      files.length ? Card(FileList({ files, onMove: move, onRemove: (i) => { files = files.filter((_, j) => j !== i); render() } })) : null,
+      ErrorText(error),
+      Btn(busy ? 'Merging…' : `Merge ${files.length} PDFs`, { onclick: run, disabled: busy || files.length < 2 }),
+    )
+  }
+  render()
+  return root
+}
+
+// ---- src/tools/split.js ----
+
+function Split() {
+  let file = null
+  let bytes = null
+  let pages = 0
+  let spec = ''
+  let mode = 'one'
+  let busy = false
+  let error = ''
+  const root = h('div', { class: 'tool' })
+
+  const load = async ([f]) => {
+    error = ''
+    try {
+      file = f
+      bytes = await readBytes(f)
+      pages = await pageCount(bytes)
+      spec = `1-${pages}`
+    } catch (e) {
+      error = e.message || 'could not read that PDF'
+      file = null
+      bytes = null
+    }
+    render()
+  }
+
+  const run = async () => {
+    busy = true
+    error = ''
+    render()
+    try {
+      const ranges = parseRanges(spec, pages)
+      const stem = file.name.replace(/\.pdf$/i, '')
+      if (mode === 'one') {
+        const out = await extractPages(bytes, ranges)
+        saveBlob(new Blob([out], { type: 'application/pdf' }), `${stem}-pages.pdf`)
+      } else {
+        const outs = await splitPdf(bytes, ranges)
+        saveBlob(
+          new Blob([zipStore(outs.map((out, i) => ({
+            name: `${stem}-${ranges[i].from}-${ranges[i].to}.pdf`,
+            data: out,
+          })))], { type: 'application/zip' }),
+          `${stem}-split.zip`,
+        )
+      }
+    } catch (e) {
+      error = e.message || 'split failed'
+    } finally {
+      busy = false
+      render()
+    }
+  }
+
+  function render() {
+    root.replaceChildren(
+      DropZone({ accept: 'application/pdf', onFiles: load }),
+      file
+        ? Card(
+            h('p', { class: 'meta' }, h('b', {}, file.name), ` — ${pages} pages`),
+            h('label', { class: 'lbl' }, 'Pages / ranges (e.g. 1-3, 5, 8-10)'),
+            h('input', {
+              class: 'textin',
+              value: spec,
+              oninput: (e) => (spec = e.target.value),
+            }),
+            h(
+              'div',
+              { class: 'radio-row' },
+              radio('one', 'One PDF with those pages'),
+              radio('zip', 'Separate PDF per range (zip)'),
+            ),
+          )
+        : null,
+      ErrorText(error),
+      Btn(busy ? 'Working…' : 'Split', { onclick: run, disabled: busy || !bytes }),
+    )
+  }
+
+  const radio = (val, text) =>
+    h(
+      'label',
+      { class: 'radio' },
+      h('input', {
+        type: 'radio',
+        name: 'splitmode',
+        checked: mode === val || undefined,
+        onchange: () => { mode = val; render() },
+      }),
+      text,
+    )
+
+  render()
+  return root
+}
+
+// ---- src/tools/organize.js ----
+
+function Organize() {
+  let file = null
+  let bytes = null
+  let items = [] // {page, w, h, rotation, deleted}
+  let busy = false
+  let error = ''
+  const root = h('div', { class: 'tool' })
+
+  const load = async ([f]) => {
+    error = ''
+    items = []
+    render()
+    try {
+      file = f
+      bytes = await readBytes(f)
+      const doc = await parsePdf(bytes)
+      items = pageLeaves(doc).map((leaf, i) => {
+        const mb = get(leaf.dict, 'MediaBox') ?? leaf.inh.MediaBox ?? [0, 0, 0, 0]
+        return {
+          page: i + 1,
+          w: Math.round(mb[2] - mb[0]),
+          h: Math.round(mb[3] - mb[1]),
+          rotation: 0,
+          deleted: false,
+        }
+      })
+    } catch (e) {
+      error = e.message || 'could not read that PDF'
+      file = null
+      bytes = null
+    }
+    render()
+  }
+
+  const run = async () => {
+    busy = true
+    error = ''
+    render()
+    try {
+      const ops = items.filter((it) => !it.deleted).map((it) => ({ page: it.page, rotation: it.rotation }))
+      if (!ops.length) throw new Error('all pages deleted')
+      const out = await organizePages(bytes, ops)
+      saveBlob(
+        new Blob([out], { type: 'application/pdf' }),
+        `${file.name.replace(/\.pdf$/i, '')}-organized.pdf`,
+      )
+    } catch (e) {
+      error = e.message || 'failed'
+    } finally {
+      busy = false
+      render()
+    }
+  }
+
+  function render() {
+    const kept = items.filter((i) => !i.deleted).length
+    root.replaceChildren(
+      DropZone({ accept: 'application/pdf', onFiles: load }),
+      items.length
+        ? h('p', { class: 'meta dim' }, `Drag to reorder · rotate / delete on hover · ${kept} of ${items.length} pages kept`)
+        : null,
+      items.length
+        ? PageGrid({
+            items,
+            onReorder: (from, to) => {
+              const c = [...items]
+              const [x] = c.splice(from, 1)
+              c.splice(to, 0, x)
+              items = c
+              render()
+            },
+            onRotate: (i) => {
+              items = items.map((x, j) => (j === i ? { ...x, rotation: (x.rotation + 90) % 360 } : x))
+              render()
+            },
+            onToggleDelete: (i) => {
+              items = items.map((x, j) => (j === i ? { ...x, deleted: !x.deleted } : x))
+              render()
+            },
+          })
+        : null,
+      ErrorText(error),
+      items.length
+        ? Btn(busy ? 'Building…' : `Download organized PDF (${kept} pages)`, { onclick: run, disabled: busy || kept === 0 })
+        : null,
+    )
+  }
+  render()
+  return root
+}
+
+// ---- src/tools/img2pdf.js ----
+
+/** Any raster → JPEG bytes via the browser's own decoder (canvas). */
+async function toJpeg(file) {
+  if (file.type === 'image/jpeg') return readBytes(file)
+  const bmp = await createImageBitmap(file)
+  const canvas = document.createElement('canvas')
+  canvas.width = bmp.width
+  canvas.height = bmp.height
+  const ctx = canvas.getContext('2d')
+  ctx.fillStyle = '#ffffff' // flatten alpha
+  ctx.drawImage(bmp, 0, 0)
+  const blob = await new Promise((res) => canvas.toBlob(res, 'image/jpeg', 0.92))
+  return new Uint8Array(await blob.arrayBuffer())
+}
+
+function ImgToPdf() {
+  let files = []
+  let busy = false
+  let error = ''
+  const root = h('div', { class: 'tool' })
+
+  const move = (from, to) => {
+    const c = [...files]
+    const [x] = c.splice(from, 1)
+    c.splice(to, 0, x)
+    files = c
+    render()
+  }
+
+  const run = async () => {
+    busy = true
+    error = ''
+    render()
+    try {
+      const images = await Promise.all(files.map(async (f) => ({ data: await toJpeg(f) })))
+      const out = imagesToPdf(images)
+      saveBlob(new Blob([out], { type: 'application/pdf' }), 'images.pdf')
+    } catch (e) {
+      error = e.message || 'failed — use JPEG or PNG images'
+    } finally {
+      busy = false
+      render()
+    }
+  }
+
+  function render() {
+    root.replaceChildren(
+      DropZone({
+        accept: 'image/jpeg,image/png,image/webp,image/gif,image/bmp',
+        multiple: true,
+        onFiles: (f) => { files = files.concat(f); render() },
+        label: 'Drop images here or ',
+      }),
+      files.length ? Card(FileList({ files, onMove: move, onRemove: (i) => { files = files.filter((_, j) => j !== i); render() } })) : null,
+      ErrorText(error),
+      Btn(busy ? 'Building…' : `Build PDF from ${files.length} image${files.length === 1 ? '' : 's'}`, {
+        onclick: run,
+        disabled: busy || !files.length,
+      }),
+    )
+  }
+  render()
+  return root
+}
+
+// ---- src/tools/extract.js ----
+
+function ExtractImgs() {
+  let file = null
+  let bytes = null
+  let busy = false
+  let error = ''
+  const root = h('div', { class: 'tool' })
+
+  const load = async ([f]) => {
+    error = ''
+    try {
+      file = f
+      bytes = await readBytes(f)
+    } catch (e) {
+      error = 'could not read that file'
+      file = null
+      bytes = null
+    }
+    render()
+  }
+
+  const run = async () => {
+    busy = true
+    error = ''
+    render()
+    try {
+      const { images, skipped } = await extractImages(bytes)
+      if (!images.length) {
+        error = skipped
+          ? `found ${skipped} image${skipped === 1 ? '' : 's'} but in formats we can't decode yet (CCITT/JBIG2/masked)`
+          : 'no embedded images found in this PDF'
+        return
+      }
+      const stem = file.name.replace(/\.pdf$/i, '')
+      if (images.length === 1) {
+        saveBlob(new Blob([images[0].data]), images[0].name)
+      } else {
+        saveBlob(new Blob([zipStore(images.map((im) => ({ name: im.name, data: im.data })))], { type: 'application/zip' }), `${stem}-images.zip`)
+      }
+      if (skipped) error = `saved ${images.length} — skipped ${skipped} unsupported`
+    } catch (e) {
+      error = e.message || 'extraction failed'
+    } finally {
+      busy = false
+      render()
+    }
+  }
+
+  function render() {
+    root.replaceChildren(
+      DropZone({ accept: 'application/pdf', onFiles: load }),
+      file ? Card(h('p', { class: 'meta' }, h('b', {}, file.name), ' — JPEG / JPEG2000 / raw rasters → PNG')) : null,
+      ErrorText(error),
+      Btn(busy ? 'Extracting…' : 'Extract images', { onclick: run, disabled: busy || !bytes }),
+    )
+  }
+  render()
+  return root
+}
+
+// ---- src/tools/pagenum.js ----
+
+function PageNums() {
+  let file = null
+  let bytes = null
+  let pages = 0
+  let busy = false
+  let error = ''
+  const root = h('div', { class: 'tool' })
+
+  const load = async ([f]) => {
+    error = ''
+    try {
+      file = f
+      bytes = await readBytes(f)
+      pages = await pageCount(bytes)
+    } catch (e) {
+      error = e.message || 'could not read that PDF'
+      file = null
+      bytes = null
+    }
+    render()
+  }
+
+  const run = async () => {
+    busy = true
+    error = ''
+    render()
+    try {
+      const out = await addPageNumbers(bytes)
+      saveBlob(new Blob([out], { type: 'application/pdf' }), `${file.name.replace(/\.pdf$/i, '')}-numbered.pdf`)
+    } catch (e) {
+      error = e.message || 'failed'
+    } finally {
+      busy = false
+      render()
+    }
+  }
+
+  function render() {
+    root.replaceChildren(
+      DropZone({ accept: 'application/pdf', onFiles: load }),
+      file ? Card(h('p', { class: 'meta' }, h('b', {}, file.name), ` — ${pages} pages`), h('p', { class: 'meta dim' }, 'Stamps "N / total" bottom-center in Helvetica 10pt')) : null,
+      ErrorText(error),
+      Btn(busy ? 'Stamping…' : 'Add page numbers', { onclick: run, disabled: busy || !bytes }),
+    )
+  }
+  render()
+  return root
+}
+
+// ---- src/tools/scrub.js ----
+
+function Scrub() {
+  let file = null
+  let bytes = null
+  let busy = false
+  let error = ''
+  const root = h('div', { class: 'tool' })
+
+  const load = async ([f]) => {
+    error = ''
+    try {
+      file = f
+      bytes = await readBytes(f)
+    } catch (e) {
+      error = 'could not read that file'
+      file = null
+      bytes = null
+    }
+    render()
+  }
+
+  const run = async () => {
+    busy = true
+    error = ''
+    render()
+    try {
+      const out = await scrubPdf(bytes)
+      const saved = bytes.length - out.length
+      saveBlob(new Blob([out], { type: 'application/pdf' }), `${file.name.replace(/\.pdf$/i, '')}-clean.pdf`)
+      if (saved > 0) error = ''
+    } catch (e) {
+      error = e.message || 'failed'
+    } finally {
+      busy = false
+      render()
+    }
+  }
+
+  function render() {
+    root.replaceChildren(
+      DropZone({ accept: 'application/pdf', onFiles: load }),
+      file
+        ? Card(
+            h('p', { class: 'meta' }, h('b', {}, file.name)),
+            h('p', { class: 'meta dim' }, 'Rebuilds the document and drops /Info, XMP metadata, document IDs, author/producer fields and dead objects. Pages and content are untouched.'),
+          )
+        : null,
+      ErrorText(error),
+      Btn(busy ? 'Scrubbing…' : 'Scrub metadata', { onclick: run, disabled: busy || !bytes }),
+    )
+  }
+  render()
+  return root
+}
+
+// ---- src/app.js ----
+
+const TOOLS = [
+  { id: 'merge', name: 'Merge PDF', desc: 'Combine PDFs into one, in your order', icon: 'files', view: Merge },
+  { id: 'split', name: 'Split PDF', desc: 'Pull out page ranges — one file or a zip', icon: 'scissors', view: Split },
+  { id: 'organize', name: 'Organize pages', desc: 'Reorder, rotate and delete pages visually', icon: 'grid', view: Organize },
+  { id: 'img2pdf', name: 'Images to PDF', desc: 'JPG/PNG/WebP pages into a single PDF', icon: 'image', view: ImgToPdf },
+  { id: 'extract', name: 'Extract images', desc: 'Pull embedded images out — JPG/PNG in a zip', icon: 'layers', view: ExtractImgs },
+  { id: 'pagenum', name: 'Page numbers', desc: 'Stamp "N / total" on every page', icon: 'hash', view: PageNums },
+  { id: 'scrub', name: 'Scrub metadata', desc: 'Strip author, producer, XMP and doc IDs', icon: 'eraser', view: Scrub },
+]
+
+const app = document.getElementById('app')
+
+function route() {
+  return location.hash.replace(/^#\/?/, '')
+}
+
+function header() {
+  return h(
+    'header',
+    {},
+    h('a', { class: 'brand', href: '#/' }, h('b', {}, 'PDF', h('span', { class: 'accent' }, 'Suite')),
+      h('span', { class: 'tagline' }, 'free forever · no account · no uploads · zero dependencies')),
+    h('a', { class: 'gh', href: 'https://github.com/mayusi/pdfsuite', title: 'Source on GitHub' },
+      icon('github', 'icon')),
+  )
+}
+
+function footer() {
+  return h(
+    'footer',
+    {},
+    h(
+      'p',
+      {},
+      'Smallpdf charges $12/mo · iLovePDF $9/mo — to upload ',
+      h('em', {}, 'your'),
+      ' documents to ',
+      h('em', {}, 'their'),
+      ' servers for work your own browser can do. PDFSuite does the same job for $0, your files never leave the machine, and the entire app is hand-written JavaScript you can read end-to-end. MIT licensed.',
+    ),
+  )
+}
+
+function home() {
+  return h(
+    'main',
+    {},
+    h('h1', {}, "Every PDF tool you'd pay Smallpdf $12/mo for. ", h('span', { class: 'accent' }, 'Free.')),
+    h('p', { class: 'sub' }, icon('shield', 'icon-sm accent'),
+      'Files never leave your browser — every tool runs 100% client-side with zero dependencies. Check the network tab, then check the source.'),
+    h(
+      'div',
+      { class: 'grid' },
+      TOOLS.map((t) =>
+        h('a', { class: 'toolcard', href: `#/${t.id}` },
+          icon(t.icon, 'icon-lg accent'),
+          h('h2', {}, t.name),
+          h('p', {}, t.desc)),
+      ),
+    ),
+  )
+}
+
+function toolView(tool) {
+  return h(
+    'main',
+    {},
+    h('a', { class: 'back', href: '#/' }, '← all tools'),
+    h('h1', {}, tool.name),
+    h('p', { class: 'sub' }, tool.desc),
+    tool.view(),
+  )
+}
+
+function render() {
+  const tool = TOOLS.find((t) => t.id === route())
+  app.replaceChildren(header(), tool ? toolView(tool) : home(), footer())
+  scrollTo(0, 0)
+}
+
+// Dropping a file anywhere EXCEPT a dropzone must not navigate away and nuke the app.
+addEventListener('dragover', (e) => e.preventDefault())
+addEventListener('drop', (e) => {
+  if (!e.target.closest?.('.dropzone')) e.preventDefault()
+})
+
+addEventListener('hashchange', render)
+render()
+</script>
+  </body>
+</html>
