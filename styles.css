@@ -117,4 +117,6 @@ main h1 { font-size: 24px; margin-top: 14px; }
 /* footer */
 footer { margin-top: auto; padding-top: 60px; }
 footer p { border-top: 1px solid var(--border); padding-top: 20px; color: var(--faint); font-size: 12px; }
+footer p + p { border-top: 0; padding-top: 6px; }
+footer a { color: var(--accent); }
 footer em { color: var(--dim); }

@@ -125,6 +125,8 @@ main h1 { font-size: 24px; margin-top: 14px; }
 /* footer */
 footer { margin-top: auto; padding-top: 60px; }
 footer p { border-top: 1px solid var(--border); padding-top: 20px; color: var(--faint); font-size: 12px; }
+footer p + p { border-top: 0; padding-top: 6px; }
+footer a { color: var(--accent); }
 footer em { color: var(--dim); }
 </style>
     <title>PDFSuite — free PDF tools, no uploads, zero deps</title>
@@ -1860,7 +1862,14 @@ function footer() {
       h('em', {}, 'your'),
       ' documents to ',
       h('em', {}, 'their'),
-      ' servers for work your own browser can do. PDFSuite does the same job for $0, your files never leave the machine, and the entire app is hand-written JavaScript you can read end-to-end. MIT licensed.',
+      ' servers for work your own browser can do. PDFSuite does the same job for $0, your files never leave the machine, and the entire app is hand-written JavaScript you can read end-to-end. MIT licensed. ',
+    ),
+    h(
+      'p',
+      {},
+      'Want it offline? ',
+      h('a', { href: './pdfsuite.html', download: 'pdfsuite.html' }, 'Download the whole app as one HTML file'),
+      ' — same code, works from a double-click.',
     ),
   )
 }

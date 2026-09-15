@@ -45,7 +45,14 @@ function footer() {
       h('em', {}, 'your'),
       ' documents to ',
       h('em', {}, 'their'),
-      ' servers for work your own browser can do. PDFSuite does the same job for $0, your files never leave the machine, and the entire app is hand-written JavaScript you can read end-to-end. MIT licensed.',
+      ' servers for work your own browser can do. PDFSuite does the same job for $0, your files never leave the machine, and the entire app is hand-written JavaScript you can read end-to-end. MIT licensed. ',
+    ),
+    h(
+      'p',
+      {},
+      'Want it offline? ',
+      h('a', { href: './pdfsuite.html', download: 'pdfsuite.html' }, 'Download the whole app as one HTML file'),
+      ' — same code, works from a double-click.',
     ),
   )
 }
