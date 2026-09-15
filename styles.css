@@ -115,6 +115,12 @@ main h1 { font-size: 24px; margin-top: 14px; }
 .pnum { font-size: 15px; font-weight: 600; }
 .pdim { font-size: 11px; color: var(--faint); margin-top: 2px; }
 .prot { font-size: 11px; color: var(--accent); margin-top: 2px; }
+.pthumb { flex: 1; width: 100%; min-height: 0; object-fit: cover; border-radius: 6px; pointer-events: none; }
+.ptext {
+  flex: 1; min-height: 0; overflow: hidden; padding: 3px;
+  font-size: 6.5px; line-height: 1.5; color: var(--faint); text-align: left;
+  word-break: break-word; user-select: none;
+}
 .pops { display: flex; justify-content: center; gap: 4px; margin-top: 6px; opacity: 0; transition: opacity 0.15s; }
 .pcard:hover .pops, .pcard.deleted .pops { opacity: 1; }
 

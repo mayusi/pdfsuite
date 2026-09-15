@@ -6,8 +6,8 @@ import { enc, get, isStream, name, ref, set, stream, typeIs } from '../src/pdf/t
 import { newDoc, writeDoc } from '../src/pdf/write.js'
 import {
   addPageNumbers, extractImages, extractPages, imagesToPdf, jpegInfo, mergePdfs,
-  organizePages, pageCount, pageDims, pageLeaves, parseRanges, readMetadata,
-  scrubPdf, splitPdf, unPredict,
+  organizePages, pageCount, pageDims, pageLeaves, pagePreview, parseRanges,
+  readMetadata, scrubPdf, splitPdf, tokenizeContent, unPredict,
 } from '../src/pdf/ops.js'
 import { crc32, zipStore } from '../src/zip.js'
 import { pngEncode, zlibStore } from '../src/png.js'
@@ -504,6 +504,68 @@ describe('qol engine', () => {
     assert.equal(images.length, 1)
     assert.deepEqual([...images[0].data], [...jpeg])
     assert.equal(images[0].mime, 'image/jpeg')
+  })
+
+  it('tokenizeContent parses strings, arrays and ops', () => {
+    const ops = tokenizeContent(enc('BT /F1 12 Tf 10 20 Td (Hello\\) done) TJ [<4869> -20 (x)] TJ ET'))
+    const tj = ops.filter((o) => o.op === 'TJ')
+    const td = ops.find((o) => o.op === 'Td')
+    assert.equal(td.operands[0], 10)
+    assert.equal(td.operands[1], 20)
+    assert.equal(tj.length, 2)
+    const arr = tj[1].operands.find((o) => o.t === 'arr')
+    assert.equal(new TextDecoder('latin1').decode(arr.items[0].bytes), 'Hi')
+    assert.equal(arr.items[1], -20)
+  })
+
+  it('pagePreview extracts the page\'s own text', async () => {
+    const dst = newDoc()
+    const pagesNum = dst.alloc()
+    const csNum = dst.alloc()
+    dst.set(csNum, stream(new Map([['Filter', name('FlateDecode')]]), deflateSync(enc('BT /F1 12 Tf 10 700 Td (Chapter 2: Methods) Tj ET'))))
+    const pageNum = dst.alloc()
+    dst.set(pageNum, new Map([
+      ['Type', name('Page')], ['Parent', ref(pagesNum)],
+      ['MediaBox', [0, 0, 612, 792]], ['Contents', ref(csNum)],
+    ]))
+    dst.set(pagesNum, new Map([['Type', name('Pages')], ['Kids', [ref(pageNum)]], ['Count', 1]]))
+    const catNum = dst.alloc()
+    dst.set(catNum, new Map([['Type', name('Catalog')], ['Pages', ref(pagesNum)]]))
+    const doc = await parsePdf(writeDoc(dst, catNum))
+    const prev = await pagePreview(doc, pageLeaves(doc)[0])
+    assert.equal(prev.text, 'Chapter 2: Methods')
+    assert.equal(prev.img, null)
+  })
+
+  it('pagePreview picks the dominant painted image', async () => {
+    const dst = newDoc()
+    const pagesNum = dst.alloc()
+    const mkImg = (bytes) => {
+      const n = dst.alloc()
+      dst.set(n, stream(new Map([
+        ['Type', name('XObject')], ['Subtype', name('Image')],
+        ['Width', 4], ['Height', 4], ['ColorSpace', name('DeviceRGB')],
+        ['BitsPerComponent', 8], ['Filter', name('DCTDecode')], ['Length', bytes.length],
+      ]), bytes))
+      return n
+    }
+    const big = mkImg(new Uint8Array([1, 1, 1]))
+    const small = mkImg(new Uint8Array([2, 2]))
+    const csNum = dst.alloc()
+    dst.set(csNum, stream(new Map(), enc('q 10 0 0 10 0 0 cm /Im0 Do Q q 500 0 0 500 0 0 cm /Im1 Do Q')))
+    const pageNum = dst.alloc()
+    dst.set(pageNum, new Map([
+      ['Type', name('Page')], ['Parent', ref(pagesNum)], ['MediaBox', [0, 0, 612, 792]],
+      ['Contents', ref(csNum)],
+      ['Resources', new Map([['XObject', new Map([['Im0', ref(small)], ['Im1', ref(big)]])]])],
+    ]))
+    dst.set(pagesNum, new Map([['Type', name('Pages')], ['Kids', [ref(pageNum)]], ['Count', 1]]))
+    const catNum = dst.alloc()
+    dst.set(catNum, new Map([['Type', name('Catalog')], ['Pages', ref(pagesNum)]]))
+    const doc = await parsePdf(writeDoc(dst, catNum))
+    const prev = await pagePreview(doc, pageLeaves(doc)[0])
+    assert.equal(prev.img.mime, 'image/jpeg')
+    assert.deepEqual([...prev.img.data], [1, 1, 1]) // the 500x500-painted one, not the 10x10
   })
 
   it('extractImages tags output mime types', async () => {

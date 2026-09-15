@@ -123,6 +123,12 @@ main h1 { font-size: 24px; margin-top: 14px; }
 .pnum { font-size: 15px; font-weight: 600; }
 .pdim { font-size: 11px; color: var(--faint); margin-top: 2px; }
 .prot { font-size: 11px; color: var(--accent); margin-top: 2px; }
+.pthumb { flex: 1; width: 100%; min-height: 0; object-fit: cover; border-radius: 6px; pointer-events: none; }
+.ptext {
+  flex: 1; min-height: 0; overflow: hidden; padding: 3px;
+  font-size: 6.5px; line-height: 1.5; color: var(--faint); text-align: left;
+  word-break: break-word; user-select: none;
+}
 .pops { display: flex; justify-content: center; gap: 4px; margin-top: 6px; opacity: 0; transition: opacity 0.15s; }
 .pcard:hover .pops, .pcard.deleted .pops { opacity: 1; }
 
@@ -1192,6 +1198,148 @@ async function scrubPdf(bytes) {
   return finishDoc(dst, pagesRef, kids)
 }
 
+// ---------- page previews (text + dominant image, no renderer) ----------
+
+/** Concatenated, decoded Contents bytes for a page (null if undecodable). */
+async function contentBytes(doc, leaf) {
+  let c = get(leaf.dict, 'Contents')
+  if (isRef(c)) c = deref(doc, c)
+  const streams = isStream(c) ? [c]
+    : Array.isArray(c) ? c.map((x) => (isRef(x) ? deref(doc, x) : x)).filter(isStream)
+    : []
+  const parts = []
+  for (const s of streams) {
+    let d = s.data
+    const fl = get(s.dict, 'Filter')
+    const chain = Array.isArray(fl) ? fl : fl ? [fl] : []
+    for (const f of chain) {
+      const fn = isName(f) ? f.v : null
+      if (fn === 'FlateDecode' || fn === 'Fl') d = await inflate(d)
+      else return null
+    }
+    parts.push(d)
+  }
+  return parts.length ? concat(parts) : null
+}
+
+/**
+ * Minimal content-stream tokenizer → [{op, operands}].
+ * Handles names, numbers, literal+hex strings, arrays, dict marks.
+ * Operands keep source order; arrays arrive as {t:'arr', items}.
+ */
+function tokenizeContent(data) {
+  const ops = []
+  let operands = []
+  let i = 0
+  const n = data.length
+  const isWS = (c) => c === 0 || c === 9 || c === 10 || c === 12 || c === 13 || c === 32
+  const isDelim = (c) => isWS(c) || c === 0x5b || c === 0x5d || c === 0x3c || c === 0x3e || c === 0x28 || c === 0x29 || c === 0x2f || c === 0x25
+  while (i < n) {
+    const c = data[i]
+    if (isWS(c)) { i++; continue }
+    if (c === 0x25) { while (i < n && data[i] !== 0x0a && data[i] !== 0x0d) i++; continue }
+    if (c === 0x2f) {
+      let j = i + 1
+      while (j < n && !isDelim(data[j])) j++
+      operands.push({ t: 'name', v: dec(data.subarray(i + 1, j)) })
+      i = j
+      continue
+    }
+    if (c === 0x28) {
+      let j = i + 1, depth = 1
+      const bytes = []
+      while (j < n && depth) {
+        const b = data[j]
+        if (b === 0x5c) { bytes.push(data[j + 1]); j += 2; continue }
+        if (b === 0x28) depth++
+        else if (b === 0x29) { depth--; if (!depth) { j++; break } }
+        bytes.push(b)
+        j++
+      }
+      operands.push({ t: 'str', bytes: Uint8Array.from(bytes) })
+      i = j
+      continue
+    }
+    if (c === 0x3c) {
+      if (data[i + 1] === 0x3c) { operands.push({ t: 'dict' }); i += 2; continue }
+      let j = i + 1, hexs = ''
+      while (j < n && data[j] !== 0x3e) { if (!isWS(data[j])) hexs += String.fromCharCode(data[j]); j++ }
+      const bytes = new Uint8Array(Math.ceil(hexs.length / 2))
+      for (let k = 0; k < bytes.length; k++) bytes[k] = parseInt(hexs.slice(k * 2, k * 2 + 2).padEnd(2, '0'), 16)
+      operands.push({ t: 'str', bytes })
+      i = j + 1
+      continue
+    }
+    if (c === 0x3e && data[i + 1] === 0x3e) { operands.push({ t: 'dict' }); i += 2; continue }
+    if (c === 0x5b) { operands.push({ t: '[' }); i++; continue }
+    if (c === 0x5d) {
+      let k = operands.length - 1
+      while (k >= 0 && operands[k].t !== '[') k--
+      const items = operands.splice(k + 1)
+      operands.length = k
+      operands.push({ t: 'arr', items })
+      i++
+      continue
+    }
+    let j = i
+    while (j < n && !isDelim(data[j])) j++
+    const tok = dec(data.subarray(i, j))
+    i = j
+    if (/^[+-]?(\d+\.?\d*|\.\d+)$/.test(tok)) operands.push(parseFloat(tok))
+    else if (tok === 'true' || tok === 'false' || tok === 'null') operands.push(tok === 'true' ? true : tok === 'false' ? false : null)
+    else { ops.push({ op: tok, operands }); operands = [] }
+  }
+  return ops
+}
+
+/**
+ * Best-effort visual for a page: {img: {data, mime} | null, text: string}.
+ * img = the largest painted image XObject (dominant cm area); text = the
+ * page's own first characters of drawn text (Tj/TJ operands, latin1-decoded).
+ */
+async function pagePreview(doc, leaf, maxLen = 200) {
+  const data = await contentBytes(doc, leaf)
+  if (!data) return { img: null, text: '' }
+  const ops = tokenizeContent(data)
+  const parts = []
+  for (const { op, operands } of ops) {
+    if (op === 'Tj' || op === "'" || op === '"') {
+      for (let k = operands.length - 1; k >= 0; k--) {
+        if (operands[k].t === 'str') { parts.push(dec(operands[k].bytes)); break }
+      }
+    } else if (op === 'TJ') {
+      const arr = operands.find((o) => o.t === 'arr')
+      if (arr) for (const it of arr.items) if (it.t === 'str') parts.push(dec(it.bytes))
+    }
+  }
+  const text = parts.join(' ').replace(/\s+/g, ' ').trim().slice(0, maxLen)
+  return { img: await dominantImage(doc, leaf, ops), text }
+}
+
+/** Largest-painted-area image XObject invoked by the page's Do operators. */
+async function dominantImage(doc, leaf, ops) {
+  const resSrc = get(leaf.dict, 'Resources') ?? leaf.inh.Resources
+  const res = isRef(resSrc) ? deref(doc, resSrc) : resSrc
+  const xoSrc = get(res, 'XObject')
+  const xo = isRef(xoSrc) ? deref(doc, xoSrc) : xoSrc
+  if (!(xo instanceof Map)) return null
+  let cm = [1, 0, 0, 1, 0, 0]
+  let best = null
+  for (const { op, operands } of ops) {
+    if (op === 'cm' && operands.length === 6) cm = operands.map(Number)
+    else if (op === 'Do') {
+      const nm = [...operands].reverse().find((o) => o.t === 'name')
+      if (!nm) continue
+      let xv = xo.get(nm.v)
+      if (isRef(xv)) xv = deref(doc, xv)
+      if (!isStream(xv) || get(xv.dict, 'Subtype')?.v !== 'Image') continue
+      const area = Math.abs(cm[0] * cm[3] - cm[1] * cm[2])
+      if (!best || area > best.area) best = { area, xv }
+    }
+  }
+  return best ? decodeImageStream(doc, best.xv) : null
+}
+
 // ---------- extract images ----------
 
 /** Undo PNG/TIFF predictors on inflated image data (DecodeParms). */
@@ -1244,6 +1392,52 @@ function unPredict(data, { predictor = 1, columns = 1, colors = 1, bpc = 8 }) {
  * Returns { images: [{name, data, w, h}], skipped } — DCTDecode→.jpg,
  * JPXDecode→.jp2, FlateDecode raw RGB/gray 8-bit→.png, else counted in skipped.
  */
+/**
+ * Decode one image XObject stream → {data, mime, ext} or null when unsupported.
+ * Applies the full /Filter chain in order; a trailing image codec (DCT/JPX)
+ * names the format, everything else is unwrapped as compression.
+ */
+async function decodeImageStream(doc, v) {
+  const w = get(v.dict, 'Width') ?? 0
+  const h = get(v.dict, 'Height') ?? 0
+  const filterVal = get(v.dict, 'Filter')
+  const chain = (Array.isArray(filterVal) ? filterVal : filterVal === undefined ? [] : [filterVal]).map(
+    (fl) => (isName(fl) ? fl.v : null),
+  )
+  const codec = { DCTDecode: ['.jpg', 'image/jpeg'], DCT: ['.jpg', 'image/jpeg'], JPXDecode: ['.jp2', 'image/jp2'], JPX: ['.jp2', 'image/jp2'] }
+  const last = chain.length ? chain[chain.length - 1] : null
+  const out = last ? codec[last] : undefined
+  const decodeChain = out ? chain.slice(0, -1) : chain
+  let data = v.data
+  for (const fl of decodeChain) {
+    if (fl === 'FlateDecode' || fl === 'Fl') data = await inflate(data)
+    else return null
+  }
+  if (out) return { data, mime: out[1], ext: out[0] }
+  if (!decodeChain.every((fl) => fl === 'FlateDecode' || fl === 'Fl' || fl === null)) return null
+  const bpc = get(v.dict, 'BitsPerComponent') ?? 8
+  let cs = get(v.dict, 'ColorSpace')
+  if (isRef(cs)) cs = deref(doc, cs)
+  const csName = isName(cs) ? cs.v : Array.isArray(cs) && isName(cs[0]) ? cs[0].v : null
+  if (bpc !== 8 || (csName !== 'DeviceRGB' && csName !== 'DeviceGray')) return null
+  const colors = csName === 'DeviceRGB' ? 3 : 1
+  let dp = get(v.dict, 'DecodeParms') ?? get(v.dict, 'DP')
+  if (Array.isArray(dp)) dp = [...dp].reverse().find((x) => x instanceof Map)
+  const parms = dp instanceof Map ? {
+    predictor: get(dp, 'Predictor') ?? 1,
+    columns: get(dp, 'Columns') ?? w,
+    colors: get(dp, 'Colors') ?? colors,
+    bpc: get(dp, 'BitsPerComponent') ?? 8,
+  } : { predictor: 1, columns: w, colors, bpc: 8 }
+  const raw = unPredict(data, parms)
+  if (raw.length !== w * h * colors) return null
+  return { data: pngEncode(w, h, raw, colors === 1), mime: 'image/png', ext: '.png' }
+}
+
+/**
+ * Pull embedded images out of a PDF.
+ * Returns { images: [{name, data, w, h, mime}], skipped }.
+ */
 async function extractImages(bytes) {
   const doc = await parsePdf(bytes)
   const images = []
@@ -1254,47 +1448,9 @@ async function extractImages(bytes) {
     i++
     const w = get(v.dict, 'Width') ?? 0
     const h = get(v.dict, 'Height') ?? 0
-    const filterVal = get(v.dict, 'Filter')
-    const chain = (Array.isArray(filterVal) ? filterVal : filterVal === undefined ? [] : [filterVal]).map(
-      (fl) => (isName(fl) ? fl.v : null),
-    )
-    const stem = `image-${i}-${w}x${h}`
-    const codec = { DCTDecode: ['.jpg', 'image/jpeg'], DCT: ['.jpg', 'image/jpeg'], JPXDecode: ['.jp2', 'image/jp2'], JPX: ['.jp2', 'image/jp2'] }
-    try {
-      const last = chain.length ? chain[chain.length - 1] : null
-      const out = last ? codec[last] : undefined
-      // Every filter except a trailing image codec is a compression layer to
-      // unwrap in listed order (e.g. [/FlateDecode /DCTDecode] = flate(jpeg)).
-      const decodeChain = out ? chain.slice(0, -1) : chain
-      let data = v.data
-      for (const fl of decodeChain) {
-        if (fl === 'FlateDecode' || fl === 'Fl') data = await inflate(data)
-        else throw new Error(`unsupported filter ${fl}`)
-      }
-      if (out) {
-        images.push({ name: `${stem}${out[0]}`, data, w, h, mime: out[1] })
-      } else if (decodeChain.every((fl) => fl === 'FlateDecode' || fl === 'Fl' || fl === null)) {
-        const bpc = get(v.dict, 'BitsPerComponent') ?? 8
-        let cs = get(v.dict, 'ColorSpace')
-        if (isRef(cs)) cs = deref(doc, cs)
-        const csName = isName(cs) ? cs.v : Array.isArray(cs) && isName(cs[0]) ? cs[0].v : null
-        if (bpc !== 8 || (csName !== 'DeviceRGB' && csName !== 'DeviceGray')) { skipped++; continue }
-        const colors = csName === 'DeviceRGB' ? 3 : 1
-        let dp = get(v.dict, 'DecodeParms') ?? get(v.dict, 'DP')
-        if (Array.isArray(dp)) dp = [...dp].reverse().find((x) => x instanceof Map)
-        const parms = dp instanceof Map ? {
-          predictor: get(dp, 'Predictor') ?? 1,
-          columns: get(dp, 'Columns') ?? w,
-          colors: get(dp, 'Colors') ?? colors,
-          bpc: get(dp, 'BitsPerComponent') ?? 8,
-        } : { predictor: 1, columns: w, colors, bpc: 8 }
-        const raw = unPredict(data, parms)
-        if (raw.length !== w * h * colors) { skipped++; continue }
-        images.push({ name: `${stem}.png`, data: pngEncode(w, h, raw, colors === 1), w, h, mime: 'image/png' })
-      } else {
-        skipped++
-      }
-    } catch { skipped++ }
+    const dec = await decodeImageStream(doc, v).catch(() => null)
+    if (dec) images.push({ name: `image-${i}-${w}x${h}${dec.ext}`, data: dec.data, w, h, mime: dec.mime })
+    else skipped++
   }
   return { images, skipped }
 }
@@ -1471,7 +1627,9 @@ function FileList({ files, onMove, onRemove }) {
           if (dragIdx !== null && dragIdx !== i) onMove(dragIdx, i)
         },
       },
-      h('span', { class: 'idx' }, String(i + 1)),
+      f.thumb
+        ? h('img', { class: 'thumb', src: f.thumb, alt: '' })
+        : h('span', { class: 'idx' }, String(i + 1)),
       h('span', { class: 'fname' }, f.name, f.meta ? h('span', { class: 'fmeta' }, f.meta) : null),
       f.err ? h('span', { class: 'ferr' }, f.err) : h('span', { class: 'fsize' }, fmtBytes(f.size)),
       iconBtn('up', 'Move up', () => onMove(i, i - 1), i === 0),
@@ -1509,7 +1667,7 @@ function ErrorText(msg) {
  * items: [{page, w, h, rotation, deleted}] — cards are proportionally sized
  * to the real MediaBox so portrait/landscape/mixed sizes read at a glance.
  */
-function PageGrid({ items, onReorder, onRotate, onToggleDelete }) {
+function PageGrid({ items, onReorder, onRotate, onToggleDelete, selected, onSelect }) {
   let dragIdx = null
   const grid = h('div', { class: 'pgrid' })
 
@@ -1517,9 +1675,10 @@ function PageGrid({ items, onReorder, onRotate, onToggleDelete }) {
     const card = h(
       'div',
       {
-        class: 'pcard' + (it.deleted ? ' deleted' : ''),
+        class: 'pcard' + (it.deleted ? ' deleted' : '') + (selected?.has(it) ? ' sel' : ''),
         style: { aspectRatio: it.w && it.h ? `${it.w} / ${it.h}` : '3 / 4' },
         draggable: 'true',
+        onclick: onSelect ? (e) => onSelect(i, e.shiftKey) : undefined,
         ondragstart: (e) => {
           dragIdx = i
           e.dataTransfer.effectAllowed = 'move'
@@ -1541,16 +1700,22 @@ function PageGrid({ items, onReorder, onRotate, onToggleDelete }) {
         },
       },
       h('div', { class: 'pbody' },
+        it.imgUrl
+          ? h('img', { class: 'pthumb', src: it.imgUrl, alt: '', draggable: 'false' })
+          : it.text
+            ? h('div', { class: 'ptext' }, it.text)
+            : null,
         h('div', { class: 'pnum' }, `p${it.page}`),
         h('div', { class: 'pdim' }, `${it.w}×${it.h}`),
         it.rotation ? h('div', { class: 'prot' }, `${it.rotation}°`) : null,
       ),
+      onSelect && selected?.has(it) ? h('div', { class: 'pchk' }, icon('check', 'icon-sm')) : null,
       h(
         'div',
         { class: 'pops' },
-        iconBtn('rotl', 'Rotate −90°', () => onRotate(i, -90)),
-        iconBtn('rotate', 'Rotate +90°', () => onRotate(i, 90)),
-        iconBtn(it.deleted ? 'undo' : 'x', it.deleted ? 'Restore' : 'Delete', () => onToggleDelete(i)),
+        iconBtn('rotl', 'Rotate −90°', (e) => { e.stopPropagation(); onRotate(i, -90) }),
+        iconBtn('rotate', 'Rotate +90°', (e) => { e.stopPropagation(); onRotate(i, 90) }),
+        iconBtn(it.deleted ? 'undo' : 'x', it.deleted ? 'Restore' : 'Delete', (e) => { e.stopPropagation(); onToggleDelete(i) }),
       ),
     )
     grid.append(card)
@@ -1585,6 +1750,11 @@ function SelectGrid({ items, selected, onToggle }) {
           },
         },
         h('div', { class: 'pbody' },
+          it.imgUrl
+            ? h('img', { class: 'pthumb', src: it.imgUrl, alt: '', draggable: 'false' })
+            : it.text
+              ? h('div', { class: 'ptext' }, it.text)
+              : null,
           h('div', { class: 'pnum' }, `p${it.page}`),
           h('div', { class: 'pdim' }, `${it.w}×${it.h}`),
         ),
@@ -1709,8 +1879,13 @@ function Merge() {
       try {
         const bytes = await readBytes(f)
         entry.bytes = bytes
-        entry.pages = await pageCount(bytes)
+        const doc = await parsePdf(bytes)
+        entry.pages = pageLeaves(doc).length
         entry.meta = `${entry.pages} page${entry.pages === 1 ? '' : 's'}`
+        try {
+          const pv = await pagePreview(doc, pageLeaves(doc)[0])
+          if (pv.img) entry.thumb = URL.createObjectURL(new Blob([pv.img.data], { type: pv.img.mime }))
+        } catch { /* no thumbnail — row keeps index */ }
       } catch {
         entry.err = 'not a readable PDF'
       }
@@ -1755,7 +1930,7 @@ function Merge() {
       }),
       files.length
         ? Card(
-            FileList({ files, onMove: move, onRemove: (i) => { files = files.filter((_, j) => j !== i); render() } }),
+            FileList({ files, onMove: move, onRemove: (i) => { if (files[i].thumb) URL.revokeObjectURL(files[i].thumb); files = files.filter((_, j) => j !== i); render() } }),
             h('p', { class: 'meta dim', style: { marginTop: '10px' } },
               `Drag to reorder · ${good.length} valid · ${total} pages total`),
           )
@@ -1798,6 +1973,7 @@ function Split() {
   let busy = false
   let error = ''
   let loadGen = 0
+  let urls = []
   const root = h('div', { class: 'tool' })
 
   const load = async ([f]) => {
@@ -1809,6 +1985,8 @@ function Split() {
     lastPick = null
     spec = ''
     specOK = true
+    for (const u of urls) URL.revokeObjectURL(u)
+    urls = []
     render()
     try {
       const b = await readBytes(f)
@@ -1816,9 +1994,25 @@ function Split() {
       const doc = await parsePdf(b)
       if (my !== loadGen) return
       bytes = b
-      items = pageDims(doc).map((d, i) => ({ page: i + 1, w: d.w, h: d.h }))
+      const leaves = pageLeaves(doc)
+      const dims = pageDims(doc)
+      items = dims.map((d, i) => ({ page: i + 1, w: d.w, h: d.h, imgUrl: null, text: '' }))
       selected = new Set(items.map((i) => i.page))
       spec = selToSpec(selected)
+      render()
+      leaves.forEach(async (leaf, i) => {
+        try {
+          const pv = await pagePreview(doc, leaf)
+          if (my !== loadGen) return
+          if (pv.img) {
+            items[i].imgUrl = URL.createObjectURL(new Blob([pv.img.data], { type: pv.img.mime }))
+            urls.push(items[i].imgUrl)
+          } else {
+            items[i].text = pv.text
+          }
+          render()
+        } catch { /* card keeps dims */ }
+      })
     } catch (e) {
       if (my !== loadGen) return
       error = e.message || 'could not read that PDF'
@@ -1965,7 +2159,11 @@ function Split() {
 function Organize() {
   let file = null
   let bytes = null
-  let items = [] // {page, w, h, rotation, deleted}
+  let items = [] // {page, w, h, rotation, deleted, imgUrl, text}
+  let sel = new Set() // selected item objects (identity survives reorder)
+  let lastIdx = null // shift-click anchor
+  let moveTo = 1
+  let urls = [] // object URLs to revoke on reload
   let busy = false
   let error = ''
   let loadGen = 0
@@ -1976,6 +2174,10 @@ function Organize() {
     error = ''
     file = f
     items = []
+    sel = new Set()
+    lastIdx = null
+    for (const u of urls) URL.revokeObjectURL(u)
+    urls = []
     render()
     try {
       const b = await readBytes(f)
@@ -1983,7 +2185,8 @@ function Organize() {
       const doc = await parsePdf(b)
       if (my !== loadGen) return
       bytes = b
-      items = pageLeaves(doc).map((leaf, i) => {
+      const leaves = pageLeaves(doc)
+      items = leaves.map((leaf, i) => {
         const mb = get(leaf.dict, 'MediaBox') ?? leaf.inh.MediaBox ?? [0, 0, 0, 0]
         return {
           page: i + 1,
@@ -1991,13 +2194,59 @@ function Organize() {
           h: Math.round(mb[3] - mb[1]),
           rotation: 0,
           deleted: false,
+          imgUrl: null,
+          text: '',
         }
+      })
+      render()
+      // fill previews progressively (real image thumb, else the page's own text)
+      leaves.forEach(async (leaf, i) => {
+        try {
+          const pv = await pagePreview(doc, leaf)
+          if (my !== loadGen) return
+          if (pv.img) {
+            items[i].imgUrl = URL.createObjectURL(new Blob([pv.img.data], { type: pv.img.mime }))
+            urls.push(items[i].imgUrl)
+          } else {
+            items[i].text = pv.text
+          }
+          render()
+        } catch { /* no preview — card keeps dims */ }
       })
     } catch (e) {
       if (my !== loadGen) return
       error = e.message || 'could not read that PDF'
       file = null
       bytes = null
+    }
+    render()
+  }
+
+  const onSelect = (i, shift) => {
+    if (shift && lastIdx !== null) {
+      const [a, b] = lastIdx < i ? [lastIdx, i] : [i, lastIdx]
+      for (let k = a; k <= b; k++) sel.add(items[k])
+    } else {
+      sel.has(items[i]) ? sel.delete(items[i]) : sel.add(items[i])
+    }
+    lastIdx = i
+    render()
+  }
+
+  const applySel = (fn) => {
+    items = items.map((x) => (sel.has(x) ? fn(x) : x))
+    render()
+  }
+
+  const moveSelected = (where) => {
+    const picked = items.filter((x) => sel.has(x))
+    const rest = items.filter((x) => !sel.has(x))
+    if (!picked.length) return
+    if (where === 'front') items = [...picked, ...rest]
+    else if (where === 'back') items = [...rest, ...picked]
+    else {
+      const idx = Math.max(0, Math.min(rest.length, moveTo - 1))
+      items = [...rest.slice(0, idx), ...picked, ...rest.slice(idx)]
     }
     render()
   }
@@ -2024,23 +2273,46 @@ function Organize() {
 
   function render() {
     const kept = items.filter((i) => !i.deleted).length
-    const deleted = items.length - kept
+    const n = sel.size
     setKids(root,
       DropZone({ accept: 'application/pdf', onFiles: load }),
       items.length
-        ? h('p', { class: 'meta dim' }, `Drag to reorder · rotate / delete on hover · ${kept} of ${items.length} pages kept`)
+        ? h('p', { class: 'meta dim' },
+            `Click to select (shift = range) · drag to reorder · rotate / delete on hover · ${kept} of ${items.length} kept${n ? ` · ${n} selected` : ''}`)
         : null,
       items.length
         ? Toolbar([
-            ['Rotate all +90°', () => { items = items.map((x) => ({ ...x, rotation: (x.rotation + 90) % 360 })); render() }],
-            ['Reverse order', () => { items = [...items].reverse(); render() }],
-            ['Restore deleted', () => { items = items.map((x) => ({ ...x, deleted: false })); render() }, !deleted],
-            ['Reset all', () => { items = items.map((x) => ({ ...x, rotation: 0, deleted: false })); items.sort((a, b) => a.page - b.page); render() }],
+            ['Select all', () => { sel = new Set(items); render() }],
+            ['Clear', () => { sel = new Set(); render() }, !n],
+            ['⇤ To front', () => moveSelected('front'), !n],
+            ['To back ⇥', () => moveSelected('back'), !n],
+            ['Rotate sel +90°', () => applySel((x) => ({ ...x, rotation: (x.rotation + 90) % 360 })), !n],
+            ['Delete sel', () => applySel((x) => ({ ...x, deleted: true })), !n],
+            ['Restore all', () => { items = items.map((x) => ({ ...x, deleted: false })); render() }, kept === items.length],
+            ['Reset all', () => {
+              items = items.map((x) => ({ ...x, rotation: 0, deleted: false }))
+              items.sort((a, b) => a.page - b.page)
+              sel = new Set()
+              render()
+            }],
           ])
+        : null,
+      items.length
+        ? h('div', { class: 'toolbar' },
+            h('label', { class: 'lbl', style: { alignSelf: 'center', margin: 0 } }, 'Move selected to position'),
+            h('input', {
+              class: 'textin num', type: 'number', value: moveTo, min: 1, max: items.length,
+              style: { width: '80px', margin: 0 },
+              oninput: (e) => (moveTo = parseInt(e.target.value, 10) || 1),
+            }),
+            h('button', { type: 'button', class: 'tbtn', disabled: !n || undefined, onclick: () => moveSelected('at') }, 'Move'),
+          )
         : null,
       items.length
         ? PageGrid({
             items,
+            selected: sel,
+            onSelect,
             onReorder: (from, to) => {
               const c = [...items]
               const [x] = c.splice(from, 1)

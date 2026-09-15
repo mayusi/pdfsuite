@@ -1,6 +1,7 @@
 import { h, setKids, readBytes, saveBlob } from '../ui/dom.js'
 import { Btn, Card, DropZone, ErrorText, FileList } from '../ui/widgets.js'
-import { mergePdfs, pageCount } from '../pdf/ops.js'
+import { parsePdf } from '../pdf/parse.js'
+import { mergePdfs, pageCount, pageLeaves, pagePreview } from '../pdf/ops.js'
 
 export function Merge() {
   let files = [] // {file, bytes, pages, err}
@@ -16,8 +17,13 @@ export function Merge() {
       try {
         const bytes = await readBytes(f)
         entry.bytes = bytes
-        entry.pages = await pageCount(bytes)
+        const doc = await parsePdf(bytes)
+        entry.pages = pageLeaves(doc).length
         entry.meta = `${entry.pages} page${entry.pages === 1 ? '' : 's'}`
+        try {
+          const pv = await pagePreview(doc, pageLeaves(doc)[0])
+          if (pv.img) entry.thumb = URL.createObjectURL(new Blob([pv.img.data], { type: pv.img.mime }))
+        } catch { /* no thumbnail — row keeps index */ }
       } catch {
         entry.err = 'not a readable PDF'
       }
@@ -62,7 +68,7 @@ export function Merge() {
       }),
       files.length
         ? Card(
-            FileList({ files, onMove: move, onRemove: (i) => { files = files.filter((_, j) => j !== i); render() } }),
+            FileList({ files, onMove: move, onRemove: (i) => { if (files[i].thumb) URL.revokeObjectURL(files[i].thumb); files = files.filter((_, j) => j !== i); render() } }),
             h('p', { class: 'meta dim', style: { marginTop: '10px' } },
               `Drag to reorder · ${good.length} valid · ${total} pages total`),
           )

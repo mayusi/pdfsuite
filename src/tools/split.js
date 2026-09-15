@@ -1,7 +1,7 @@
 import { h, setKids, readBytes, saveBlob } from '../ui/dom.js'
 import { Btn, Card, DropZone, ErrorText, SelectGrid, Toolbar } from '../ui/widgets.js'
 import { parsePdf } from '../pdf/parse.js'
-import { extractPages, pageDims, parseRanges, splitPdf } from '../pdf/ops.js'
+import { extractPages, pageDims, pageLeaves, pagePreview, parseRanges, splitPdf } from '../pdf/ops.js'
 import { zipStore } from '../zip.js'
 
 /** Selected set → "1-3, 5" spec string. */
@@ -29,6 +29,7 @@ export function Split() {
   let busy = false
   let error = ''
   let loadGen = 0
+  let urls = []
   const root = h('div', { class: 'tool' })
 
   const load = async ([f]) => {
@@ -40,6 +41,8 @@ export function Split() {
     lastPick = null
     spec = ''
     specOK = true
+    for (const u of urls) URL.revokeObjectURL(u)
+    urls = []
     render()
     try {
       const b = await readBytes(f)
@@ -47,9 +50,25 @@ export function Split() {
       const doc = await parsePdf(b)
       if (my !== loadGen) return
       bytes = b
-      items = pageDims(doc).map((d, i) => ({ page: i + 1, w: d.w, h: d.h }))
+      const leaves = pageLeaves(doc)
+      const dims = pageDims(doc)
+      items = dims.map((d, i) => ({ page: i + 1, w: d.w, h: d.h, imgUrl: null, text: '' }))
       selected = new Set(items.map((i) => i.page))
       spec = selToSpec(selected)
+      render()
+      leaves.forEach(async (leaf, i) => {
+        try {
+          const pv = await pagePreview(doc, leaf)
+          if (my !== loadGen) return
+          if (pv.img) {
+            items[i].imgUrl = URL.createObjectURL(new Blob([pv.img.data], { type: pv.img.mime }))
+            urls.push(items[i].imgUrl)
+          } else {
+            items[i].text = pv.text
+          }
+          render()
+        } catch { /* card keeps dims */ }
+      })
     } catch (e) {
       if (my !== loadGen) return
       error = e.message || 'could not read that PDF'

@@ -87,7 +87,9 @@ export function FileList({ files, onMove, onRemove }) {
           if (dragIdx !== null && dragIdx !== i) onMove(dragIdx, i)
         },
       },
-      h('span', { class: 'idx' }, String(i + 1)),
+      f.thumb
+        ? h('img', { class: 'thumb', src: f.thumb, alt: '' })
+        : h('span', { class: 'idx' }, String(i + 1)),
       h('span', { class: 'fname' }, f.name, f.meta ? h('span', { class: 'fmeta' }, f.meta) : null),
       f.err ? h('span', { class: 'ferr' }, f.err) : h('span', { class: 'fsize' }, fmtBytes(f.size)),
       iconBtn('up', 'Move up', () => onMove(i, i - 1), i === 0),
@@ -125,7 +127,7 @@ export function ErrorText(msg) {
  * items: [{page, w, h, rotation, deleted}] — cards are proportionally sized
  * to the real MediaBox so portrait/landscape/mixed sizes read at a glance.
  */
-export function PageGrid({ items, onReorder, onRotate, onToggleDelete }) {
+export function PageGrid({ items, onReorder, onRotate, onToggleDelete, selected, onSelect }) {
   let dragIdx = null
   const grid = h('div', { class: 'pgrid' })
 
@@ -133,9 +135,10 @@ export function PageGrid({ items, onReorder, onRotate, onToggleDelete }) {
     const card = h(
       'div',
       {
-        class: 'pcard' + (it.deleted ? ' deleted' : ''),
+        class: 'pcard' + (it.deleted ? ' deleted' : '') + (selected?.has(it) ? ' sel' : ''),
         style: { aspectRatio: it.w && it.h ? `${it.w} / ${it.h}` : '3 / 4' },
         draggable: 'true',
+        onclick: onSelect ? (e) => onSelect(i, e.shiftKey) : undefined,
         ondragstart: (e) => {
           dragIdx = i
           e.dataTransfer.effectAllowed = 'move'
@@ -157,16 +160,22 @@ export function PageGrid({ items, onReorder, onRotate, onToggleDelete }) {
         },
       },
       h('div', { class: 'pbody' },
+        it.imgUrl
+          ? h('img', { class: 'pthumb', src: it.imgUrl, alt: '', draggable: 'false' })
+          : it.text
+            ? h('div', { class: 'ptext' }, it.text)
+            : null,
         h('div', { class: 'pnum' }, `p${it.page}`),
         h('div', { class: 'pdim' }, `${it.w}×${it.h}`),
         it.rotation ? h('div', { class: 'prot' }, `${it.rotation}°`) : null,
       ),
+      onSelect && selected?.has(it) ? h('div', { class: 'pchk' }, icon('check', 'icon-sm')) : null,
       h(
         'div',
         { class: 'pops' },
-        iconBtn('rotl', 'Rotate −90°', () => onRotate(i, -90)),
-        iconBtn('rotate', 'Rotate +90°', () => onRotate(i, 90)),
-        iconBtn(it.deleted ? 'undo' : 'x', it.deleted ? 'Restore' : 'Delete', () => onToggleDelete(i)),
+        iconBtn('rotl', 'Rotate −90°', (e) => { e.stopPropagation(); onRotate(i, -90) }),
+        iconBtn('rotate', 'Rotate +90°', (e) => { e.stopPropagation(); onRotate(i, 90) }),
+        iconBtn(it.deleted ? 'undo' : 'x', it.deleted ? 'Restore' : 'Delete', (e) => { e.stopPropagation(); onToggleDelete(i) }),
       ),
     )
     grid.append(card)
@@ -201,6 +210,11 @@ export function SelectGrid({ items, selected, onToggle }) {
           },
         },
         h('div', { class: 'pbody' },
+          it.imgUrl
+            ? h('img', { class: 'pthumb', src: it.imgUrl, alt: '', draggable: 'false' })
+            : it.text
+              ? h('div', { class: 'ptext' }, it.text)
+              : null,
           h('div', { class: 'pnum' }, `p${it.page}`),
           h('div', { class: 'pdim' }, `${it.w}×${it.h}`),
         ),

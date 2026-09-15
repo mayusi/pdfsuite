@@ -1,4 +1,4 @@
-import { dec, get, isHex, isName, isRef, isStream, isStr, name, ref, set, stream, typeIs } from './types.js'
+import { concat, dec, get, isHex, isName, isRef, isStream, isStr, name, ref, set, stream, typeIs } from './types.js'
 import { deref, parsePdf } from './parse.js'
 import { newDoc, writeDoc } from './write.js'
 import { inflate } from './env.js'
@@ -399,6 +399,148 @@ export async function scrubPdf(bytes) {
   return finishDoc(dst, pagesRef, kids)
 }
 
+// ---------- page previews (text + dominant image, no renderer) ----------
+
+/** Concatenated, decoded Contents bytes for a page (null if undecodable). */
+export async function contentBytes(doc, leaf) {
+  let c = get(leaf.dict, 'Contents')
+  if (isRef(c)) c = deref(doc, c)
+  const streams = isStream(c) ? [c]
+    : Array.isArray(c) ? c.map((x) => (isRef(x) ? deref(doc, x) : x)).filter(isStream)
+    : []
+  const parts = []
+  for (const s of streams) {
+    let d = s.data
+    const fl = get(s.dict, 'Filter')
+    const chain = Array.isArray(fl) ? fl : fl ? [fl] : []
+    for (const f of chain) {
+      const fn = isName(f) ? f.v : null
+      if (fn === 'FlateDecode' || fn === 'Fl') d = await inflate(d)
+      else return null
+    }
+    parts.push(d)
+  }
+  return parts.length ? concat(parts) : null
+}
+
+/**
+ * Minimal content-stream tokenizer → [{op, operands}].
+ * Handles names, numbers, literal+hex strings, arrays, dict marks.
+ * Operands keep source order; arrays arrive as {t:'arr', items}.
+ */
+export function tokenizeContent(data) {
+  const ops = []
+  let operands = []
+  let i = 0
+  const n = data.length
+  const isWS = (c) => c === 0 || c === 9 || c === 10 || c === 12 || c === 13 || c === 32
+  const isDelim = (c) => isWS(c) || c === 0x5b || c === 0x5d || c === 0x3c || c === 0x3e || c === 0x28 || c === 0x29 || c === 0x2f || c === 0x25
+  while (i < n) {
+    const c = data[i]
+    if (isWS(c)) { i++; continue }
+    if (c === 0x25) { while (i < n && data[i] !== 0x0a && data[i] !== 0x0d) i++; continue }
+    if (c === 0x2f) {
+      let j = i + 1
+      while (j < n && !isDelim(data[j])) j++
+      operands.push({ t: 'name', v: dec(data.subarray(i + 1, j)) })
+      i = j
+      continue
+    }
+    if (c === 0x28) {
+      let j = i + 1, depth = 1
+      const bytes = []
+      while (j < n && depth) {
+        const b = data[j]
+        if (b === 0x5c) { bytes.push(data[j + 1]); j += 2; continue }
+        if (b === 0x28) depth++
+        else if (b === 0x29) { depth--; if (!depth) { j++; break } }
+        bytes.push(b)
+        j++
+      }
+      operands.push({ t: 'str', bytes: Uint8Array.from(bytes) })
+      i = j
+      continue
+    }
+    if (c === 0x3c) {
+      if (data[i + 1] === 0x3c) { operands.push({ t: 'dict' }); i += 2; continue }
+      let j = i + 1, hexs = ''
+      while (j < n && data[j] !== 0x3e) { if (!isWS(data[j])) hexs += String.fromCharCode(data[j]); j++ }
+      const bytes = new Uint8Array(Math.ceil(hexs.length / 2))
+      for (let k = 0; k < bytes.length; k++) bytes[k] = parseInt(hexs.slice(k * 2, k * 2 + 2).padEnd(2, '0'), 16)
+      operands.push({ t: 'str', bytes })
+      i = j + 1
+      continue
+    }
+    if (c === 0x3e && data[i + 1] === 0x3e) { operands.push({ t: 'dict' }); i += 2; continue }
+    if (c === 0x5b) { operands.push({ t: '[' }); i++; continue }
+    if (c === 0x5d) {
+      let k = operands.length - 1
+      while (k >= 0 && operands[k].t !== '[') k--
+      const items = operands.splice(k + 1)
+      operands.length = k
+      operands.push({ t: 'arr', items })
+      i++
+      continue
+    }
+    let j = i
+    while (j < n && !isDelim(data[j])) j++
+    const tok = dec(data.subarray(i, j))
+    i = j
+    if (/^[+-]?(\d+\.?\d*|\.\d+)$/.test(tok)) operands.push(parseFloat(tok))
+    else if (tok === 'true' || tok === 'false' || tok === 'null') operands.push(tok === 'true' ? true : tok === 'false' ? false : null)
+    else { ops.push({ op: tok, operands }); operands = [] }
+  }
+  return ops
+}
+
+/**
+ * Best-effort visual for a page: {img: {data, mime} | null, text: string}.
+ * img = the largest painted image XObject (dominant cm area); text = the
+ * page's own first characters of drawn text (Tj/TJ operands, latin1-decoded).
+ */
+export async function pagePreview(doc, leaf, maxLen = 200) {
+  const data = await contentBytes(doc, leaf)
+  if (!data) return { img: null, text: '' }
+  const ops = tokenizeContent(data)
+  const parts = []
+  for (const { op, operands } of ops) {
+    if (op === 'Tj' || op === "'" || op === '"') {
+      for (let k = operands.length - 1; k >= 0; k--) {
+        if (operands[k].t === 'str') { parts.push(dec(operands[k].bytes)); break }
+      }
+    } else if (op === 'TJ') {
+      const arr = operands.find((o) => o.t === 'arr')
+      if (arr) for (const it of arr.items) if (it.t === 'str') parts.push(dec(it.bytes))
+    }
+  }
+  const text = parts.join(' ').replace(/\s+/g, ' ').trim().slice(0, maxLen)
+  return { img: await dominantImage(doc, leaf, ops), text }
+}
+
+/** Largest-painted-area image XObject invoked by the page's Do operators. */
+async function dominantImage(doc, leaf, ops) {
+  const resSrc = get(leaf.dict, 'Resources') ?? leaf.inh.Resources
+  const res = isRef(resSrc) ? deref(doc, resSrc) : resSrc
+  const xoSrc = get(res, 'XObject')
+  const xo = isRef(xoSrc) ? deref(doc, xoSrc) : xoSrc
+  if (!(xo instanceof Map)) return null
+  let cm = [1, 0, 0, 1, 0, 0]
+  let best = null
+  for (const { op, operands } of ops) {
+    if (op === 'cm' && operands.length === 6) cm = operands.map(Number)
+    else if (op === 'Do') {
+      const nm = [...operands].reverse().find((o) => o.t === 'name')
+      if (!nm) continue
+      let xv = xo.get(nm.v)
+      if (isRef(xv)) xv = deref(doc, xv)
+      if (!isStream(xv) || get(xv.dict, 'Subtype')?.v !== 'Image') continue
+      const area = Math.abs(cm[0] * cm[3] - cm[1] * cm[2])
+      if (!best || area > best.area) best = { area, xv }
+    }
+  }
+  return best ? decodeImageStream(doc, best.xv) : null
+}
+
 // ---------- extract images ----------
 
 /** Undo PNG/TIFF predictors on inflated image data (DecodeParms). */
@@ -451,6 +593,52 @@ export function unPredict(data, { predictor = 1, columns = 1, colors = 1, bpc = 
  * Returns { images: [{name, data, w, h}], skipped } — DCTDecode→.jpg,
  * JPXDecode→.jp2, FlateDecode raw RGB/gray 8-bit→.png, else counted in skipped.
  */
+/**
+ * Decode one image XObject stream → {data, mime, ext} or null when unsupported.
+ * Applies the full /Filter chain in order; a trailing image codec (DCT/JPX)
+ * names the format, everything else is unwrapped as compression.
+ */
+async function decodeImageStream(doc, v) {
+  const w = get(v.dict, 'Width') ?? 0
+  const h = get(v.dict, 'Height') ?? 0
+  const filterVal = get(v.dict, 'Filter')
+  const chain = (Array.isArray(filterVal) ? filterVal : filterVal === undefined ? [] : [filterVal]).map(
+    (fl) => (isName(fl) ? fl.v : null),
+  )
+  const codec = { DCTDecode: ['.jpg', 'image/jpeg'], DCT: ['.jpg', 'image/jpeg'], JPXDecode: ['.jp2', 'image/jp2'], JPX: ['.jp2', 'image/jp2'] }
+  const last = chain.length ? chain[chain.length - 1] : null
+  const out = last ? codec[last] : undefined
+  const decodeChain = out ? chain.slice(0, -1) : chain
+  let data = v.data
+  for (const fl of decodeChain) {
+    if (fl === 'FlateDecode' || fl === 'Fl') data = await inflate(data)
+    else return null
+  }
+  if (out) return { data, mime: out[1], ext: out[0] }
+  if (!decodeChain.every((fl) => fl === 'FlateDecode' || fl === 'Fl' || fl === null)) return null
+  const bpc = get(v.dict, 'BitsPerComponent') ?? 8
+  let cs = get(v.dict, 'ColorSpace')
+  if (isRef(cs)) cs = deref(doc, cs)
+  const csName = isName(cs) ? cs.v : Array.isArray(cs) && isName(cs[0]) ? cs[0].v : null
+  if (bpc !== 8 || (csName !== 'DeviceRGB' && csName !== 'DeviceGray')) return null
+  const colors = csName === 'DeviceRGB' ? 3 : 1
+  let dp = get(v.dict, 'DecodeParms') ?? get(v.dict, 'DP')
+  if (Array.isArray(dp)) dp = [...dp].reverse().find((x) => x instanceof Map)
+  const parms = dp instanceof Map ? {
+    predictor: get(dp, 'Predictor') ?? 1,
+    columns: get(dp, 'Columns') ?? w,
+    colors: get(dp, 'Colors') ?? colors,
+    bpc: get(dp, 'BitsPerComponent') ?? 8,
+  } : { predictor: 1, columns: w, colors, bpc: 8 }
+  const raw = unPredict(data, parms)
+  if (raw.length !== w * h * colors) return null
+  return { data: pngEncode(w, h, raw, colors === 1), mime: 'image/png', ext: '.png' }
+}
+
+/**
+ * Pull embedded images out of a PDF.
+ * Returns { images: [{name, data, w, h, mime}], skipped }.
+ */
 export async function extractImages(bytes) {
   const doc = await parsePdf(bytes)
   const images = []
@@ -461,47 +649,9 @@ export async function extractImages(bytes) {
     i++
     const w = get(v.dict, 'Width') ?? 0
     const h = get(v.dict, 'Height') ?? 0
-    const filterVal = get(v.dict, 'Filter')
-    const chain = (Array.isArray(filterVal) ? filterVal : filterVal === undefined ? [] : [filterVal]).map(
-      (fl) => (isName(fl) ? fl.v : null),
-    )
-    const stem = `image-${i}-${w}x${h}`
-    const codec = { DCTDecode: ['.jpg', 'image/jpeg'], DCT: ['.jpg', 'image/jpeg'], JPXDecode: ['.jp2', 'image/jp2'], JPX: ['.jp2', 'image/jp2'] }
-    try {
-      const last = chain.length ? chain[chain.length - 1] : null
-      const out = last ? codec[last] : undefined
-      // Every filter except a trailing image codec is a compression layer to
-      // unwrap in listed order (e.g. [/FlateDecode /DCTDecode] = flate(jpeg)).
-      const decodeChain = out ? chain.slice(0, -1) : chain
-      let data = v.data
-      for (const fl of decodeChain) {
-        if (fl === 'FlateDecode' || fl === 'Fl') data = await inflate(data)
-        else throw new Error(`unsupported filter ${fl}`)
-      }
-      if (out) {
-        images.push({ name: `${stem}${out[0]}`, data, w, h, mime: out[1] })
-      } else if (decodeChain.every((fl) => fl === 'FlateDecode' || fl === 'Fl' || fl === null)) {
-        const bpc = get(v.dict, 'BitsPerComponent') ?? 8
-        let cs = get(v.dict, 'ColorSpace')
-        if (isRef(cs)) cs = deref(doc, cs)
-        const csName = isName(cs) ? cs.v : Array.isArray(cs) && isName(cs[0]) ? cs[0].v : null
-        if (bpc !== 8 || (csName !== 'DeviceRGB' && csName !== 'DeviceGray')) { skipped++; continue }
-        const colors = csName === 'DeviceRGB' ? 3 : 1
-        let dp = get(v.dict, 'DecodeParms') ?? get(v.dict, 'DP')
-        if (Array.isArray(dp)) dp = [...dp].reverse().find((x) => x instanceof Map)
-        const parms = dp instanceof Map ? {
-          predictor: get(dp, 'Predictor') ?? 1,
-          columns: get(dp, 'Columns') ?? w,
-          colors: get(dp, 'Colors') ?? colors,
-          bpc: get(dp, 'BitsPerComponent') ?? 8,
-        } : { predictor: 1, columns: w, colors, bpc: 8 }
-        const raw = unPredict(data, parms)
-        if (raw.length !== w * h * colors) { skipped++; continue }
-        images.push({ name: `${stem}.png`, data: pngEncode(w, h, raw, colors === 1), w, h, mime: 'image/png' })
-      } else {
-        skipped++
-      }
-    } catch { skipped++ }
+    const dec = await decodeImageStream(doc, v).catch(() => null)
+    if (dec) images.push({ name: `image-${i}-${w}x${h}${dec.ext}`, data: dec.data, w, h, mime: dec.mime })
+    else skipped++
   }
   return { images, skipped }
 }
