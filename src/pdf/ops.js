@@ -3,6 +3,7 @@ import { deref, parsePdf } from './parse.js'
 import { newDoc, writeDoc } from './write.js'
 import { inflate } from './env.js'
 import { pngEncode } from '../png.js'
+import { crc32 } from '../zip.js'
 
 const INHERITED = ['Resources', 'MediaBox', 'CropBox', 'Rotate']
 
@@ -238,7 +239,15 @@ export function jpegInfo(buf) {
 }
 
 /** Pack JPEG images into a PDF — one image per page at native size. */
-export function imagesToPdf(images) {
+const PAGE_SIZES = { a4: [595.28, 841.89], letter: [612, 792] }
+
+/**
+ * Wrap jpeg images into a one-page-each PDF.
+ * opts: size 'native'|'a4'|'letter', orient 'auto'|'portrait'|'landscape',
+ *       margin (pt), fit 'contain'|'stretch'.
+ */
+export function imagesToPdf(images, opts = {}) {
+  const { size = 'native', orient = 'auto', margin = 0, fit = 'contain' } = opts
   const dst = newDoc()
   const pagesRef = dst.alloc()
   const kids = []
@@ -255,13 +264,31 @@ export function imagesToPdf(images) {
       ['Filter', name('DCTDecode')],
       ['Length', img.data.length],
     ]), img.data))
+
+    let pw, ph
+    if (size === 'native') {
+      pw = width + margin * 2
+      ph = height + margin * 2
+    } else {
+      let [bw, bh] = PAGE_SIZES[size] ?? PAGE_SIZES.a4
+      const landscape = orient === 'landscape' || (orient === 'auto' && width > height)
+      ;[pw, ph] = landscape ? [Math.max(bw, bh), Math.min(bw, bh)] : [Math.min(bw, bh), Math.max(bw, bh)]
+    }
+    const cw = Math.max(1, pw - margin * 2)
+    const ch = Math.max(1, ph - margin * 2)
+    let dw, dh
+    if (fit === 'stretch') { dw = cw; dh = ch }
+    else { const s = Math.min(cw / width, ch / height); dw = width * s; dh = height * s }
+    const x = (pw - dw) / 2
+    const y = (ph - dh) / 2
+
     const csNum = dst.alloc()
-    dst.set(csNum, stream(new Map(), new TextEncoder().encode(`q ${width} 0 0 ${height} 0 0 cm /Im0 Do Q`)))
+    dst.set(csNum, stream(new Map(), new TextEncoder().encode(`q ${dw.toFixed(2)} 0 0 ${dh.toFixed(2)} ${x.toFixed(2)} ${y.toFixed(2)} cm /Im0 Do Q`)))
     const pageNum = dst.alloc()
     dst.set(pageNum, new Map([
       ['Type', name('Page')],
       ['Parent', ref(pagesRef, 0)],
-      ['MediaBox', [0, 0, width, height]],
+      ['MediaBox', [0, 0, pw, ph]],
       ['Resources', new Map([['XObject', new Map([['Im0', ref(imgNum, 0)]])]])],
       ['Contents', ref(csNum, 0)],
     ]))
@@ -280,12 +307,13 @@ const pdfStr = (s) => '(' + s.replace(/[\\()]/g, (c) => '\\' + c) + ')'
  * opts: pos 'tl'|'tc'|'tr'|'bl'|'bc'|'br' (default 'bc'),
  *       fmt 'n'|'n-of-total'|'page-n' (default 'n-of-total'),
  *       start (number shown on first stamped page, default 1),
- *       skipFirst (don't stamp page 1), size (pt, default 10), margin (pt, default 18).
+ *       skipFirst (don't stamp page 1), size (pt, default 10), margin (pt, default 18),
+ *       fmt 'custom' uses fmtStr with {n} = page number, {t} = total.
  * Appends a content stream ON TOP of existing content and injects a
  * Helvetica base-14 font under an unlikely-colliding resource name.
  */
 export async function addPageNumbers(bytes, opts = {}) {
-  const { pos = 'bc', fmt = 'n-of-total', start = 1, skipFirst = false, size = 10, margin = 18 } = opts
+  const { pos = 'bc', fmt = 'n-of-total', fmtStr = '{n}', start = 1, skipFirst = false, size = 10, margin = 18 } = opts
   const src = await parsePdf(bytes)
   const leaves = pageLeaves(src)
   const total = leaves.length
@@ -293,6 +321,7 @@ export async function addPageNumbers(bytes, opts = {}) {
 
   const labelFor = (i) => {
     const n = i + start
+    if (fmt === 'custom') return (fmtStr || '{n}').replaceAll('{n}', String(n)).replaceAll('{t}', String(total))
     if (fmt === 'n') return String(n)
     if (fmt === 'page-n') return `Page ${n}`
     return `${n} / ${total}`
@@ -486,6 +515,21 @@ export function tokenizeContent(data) {
     while (j < n && !isDelim(data[j])) j++
     const tok = dec(data.subarray(i, j))
     i = j
+    if (tok === 'ID') {
+      // inline image payload: one ws byte, raw data until whitespace+'EI'
+      ops.push({ op: 'ID', operands })
+      operands = []
+      if (i < n && isWS(data[i])) i++
+      while (i < n) {
+        if (isWS(data[i]) && data[i + 1] === 0x45 && data[i + 2] === 0x49 && (i + 3 >= n || isDelim(data[i + 3]))) {
+          i += 3
+          ops.push({ op: 'EI', operands: [] })
+          break
+        }
+        i++
+      }
+      continue
+    }
     if (/^[+-]?(\d+\.?\d*|\.\d+)$/.test(tok)) operands.push(parseFloat(tok))
     else if (tok === 'true' || tok === 'false' || tok === 'null') operands.push(tok === 'true' ? true : tok === 'false' ? false : null)
     else { ops.push({ op: tok, operands }); operands = [] }
@@ -502,15 +546,22 @@ export async function pagePreview(doc, leaf, maxLen = 200) {
   const data = await contentBytes(doc, leaf)
   if (!data) return { img: null, text: '' }
   const ops = tokenizeContent(data)
+  const fonts = await fontMap(doc, leaf)
+  let curFont = null
   const parts = []
   for (const { op, operands } of ops) {
+    if (op === 'Tf') {
+      const nm = operands.find((o) => o.t === 'name')
+      if (nm) curFont = fonts.get(nm.v) ?? null
+      continue
+    }
     if (op === 'Tj' || op === "'" || op === '"') {
       for (let k = operands.length - 1; k >= 0; k--) {
-        if (operands[k].t === 'str') { parts.push(dec(operands[k].bytes)); break }
+        if (operands[k].t === 'str') { parts.push(decodeString(operands[k].bytes, curFont)); break }
       }
     } else if (op === 'TJ') {
       const arr = operands.find((o) => o.t === 'arr')
-      if (arr) for (const it of arr.items) if (it.t === 'str') parts.push(dec(it.bytes))
+      if (arr) for (const it of arr.items) if (it.t === 'str') parts.push(decodeString(it.bytes, curFont))
     }
   }
   const text = parts.join(' ').replace(/\s+/g, ' ').trim().slice(0, maxLen)
@@ -539,6 +590,286 @@ async function dominantImage(doc, leaf, ops) {
     }
   }
   return best ? decodeImageStream(doc, best.xv) : null
+}
+
+// ---------- page rendering ----------
+
+/** Parse a /ToUnicode CMap stream → {map: Map<code,string>, codeLen}. */
+export function parseToUnicode(data) {
+  const src = dec(data)
+  const hex = (s) => parseInt(s, 16)
+  const uni = (s) => {
+    let out = ''
+    for (let i = 0; i + 4 <= s.length; i += 4) out += String.fromCodePoint(parseInt(s.slice(i, i + 4), 16))
+    return out
+  }
+  const map = new Map()
+  let codeLen = 1
+  const blocks = src.matchAll(/beginbf(char|range)([\s\S]*?)endbf\1/g)
+  for (const b of blocks) {
+    const [, kind, body] = b
+    if (kind === 'char') {
+      for (const m of body.matchAll(/<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>/g)) {
+        codeLen = Math.max(codeLen, m[1].length / 2)
+        map.set(hex(m[1]), uni(m[2]))
+      }
+    } else {
+      for (const m of body.matchAll(/<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*(\[[^\]]*\]|<([0-9A-Fa-f]+)>)/g)) {
+        codeLen = Math.max(codeLen, m[1].length / 2)
+        const lo = hex(m[1]), hi = hex(m[2])
+        if (m[4]) for (let c = lo; c <= hi; c++) map.set(c, uni((hex(m[4]) + c - lo).toString(16).padStart(m[4].length, '0')))
+        else for (const [k, dm] of [...m[3].matchAll(/<([0-9A-Fa-f]+)>/g)].entries()) map.set(lo + k, uni(dm[1]))
+      }
+    }
+  }
+  return { map, codeLen }
+}
+
+/**
+ * Resolve a page's font resources → Map<name, {widths, firstChar, tounicode}>.
+ * widths = /Widths array (deref'd) + /FirstChar; CID /W ranges folded in.
+ */
+export async function fontMap(doc, leaf) {
+  const resSrc = get(leaf.dict, 'Resources') ?? leaf.inh.Resources
+  const res = isRef(resSrc) ? deref(doc, resSrc) : resSrc
+  let fonts = res instanceof Map ? get(res, 'Font') : null
+  if (isRef(fonts)) fonts = deref(doc, fonts)
+  const out = new Map()
+  if (!(fonts instanceof Map)) return out
+  for (const [fname, fref] of fonts) {
+    let fd = isRef(fref) ? deref(doc, fref) : fref
+    if (isStream(fd)) fd = fd.dict
+    if (!(fd instanceof Map)) continue
+    const info = { widths: null, firstChar: 0, wRanges: null, tounicode: null }
+    let w = get(fd, 'Widths')
+    if (isRef(w)) w = deref(doc, w)
+    if (Array.isArray(w)) info.widths = w
+    info.firstChar = get(fd, 'FirstChar') ?? 0
+    let wArr = get(fd, 'W')
+    if (isRef(wArr)) wArr = deref(doc, wArr)
+    if (Array.isArray(wArr)) {
+      info.wRanges = new Map()
+      for (let i = 0; i + 2 < wArr.length; i += 3) {
+        const [lo, hi, ws] = [wArr[i], wArr[i + 1], wArr[i + 2]]
+        if (typeof lo === 'number' && Array.isArray(ws)) ws.forEach((ww, k) => info.wRanges.set(lo + k, ww))
+        else if (typeof lo === 'number' && typeof hi === 'number' && typeof ws === 'number')
+          for (let c = lo; c <= hi; c++) info.wRanges.set(c, ws)
+      }
+    }
+    let tu = get(fd, 'ToUnicode')
+    if (isRef(tu)) tu = deref(doc, tu)
+    if (isStream(tu)) {
+      let d = tu.data
+      const fl = get(tu.dict, 'Filter')
+      const chain = Array.isArray(fl) ? fl : fl ? [fl] : []
+      let ok = true
+      for (const f of chain) {
+        const fn = isName(f) ? f.v : null
+        if (fn === 'FlateDecode' || fn === 'Fl') d = await inflate(d)
+        else { ok = false; break }
+      }
+      if (ok) info.tounicode = parseToUnicode(d)
+    }
+    out.set(fname, info)
+  }
+  return out
+}
+
+/** Decode a PDF string operand using a font entry (ToUnicode → latin1). */
+export function decodeString(bytes, font) {
+  if (font?.tounicode) {
+    const { map, codeLen } = font.tounicode
+    let out = ''
+    for (let i = 0; i + codeLen <= bytes.length; i += codeLen) {
+      let code = 0
+      for (let k = 0; k < codeLen; k++) code = code * 256 + bytes[i + k]
+      out += map.get(code) ?? ''
+    }
+    return out
+  }
+  return dec(bytes)
+}
+
+/** Fraction of decoded chars that are non-printable — flags garbage text. */
+const garbageRatio = (s) => {
+  if (!s.length) return 1
+  let bad = 0
+  for (const ch of s) {
+    const c = ch.codePointAt(0)
+    if ((c < 0x20 && ch !== ' ' && ch !== '\t') || (c >= 0x7f && c <= 0x9f)) bad++
+  }
+  return bad / s.length
+}
+
+const matMul = (a, b) => [
+  a[0] * b[0] + a[2] * b[1], a[1] * b[0] + a[3] * b[1],
+  a[0] * b[2] + a[2] * b[3], a[1] * b[2] + a[3] * b[3],
+  a[0] * b[4] + a[2] * b[5] + a[4], a[1] * b[4] + a[3] * b[5] + a[5],
+]
+const matPt = (m, x, y) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]]
+
+/** user→display transform (top-left origin, /Rotate applied clockwise). */
+export function displayTransform(mb, rot) {
+  const [x0, y0, x1, y1] = mb
+  if (rot === 90) return [0, 1, 1, 0, -y0, -x0]
+  if (rot === 180) return [-1, 0, 0, 1, x1, -y0]
+  if (rot === 270) return [0, -1, -1, 0, y1, x1]
+  return [1, 0, 0, -1, -x0, y1]
+}
+
+/**
+ * Interpret a page content stream into positioned display-space draw ops.
+ * Returns { ops, box } — box = {w,h} of the displayed page in points.
+ * ops: {t:'text'|'bar'|'img'|'rect', x,y,w,h, rot, str?, key?, stroke?}
+ */
+export async function collectDrawOps(doc, leaf) {
+  const data = await contentBytes(doc, leaf)
+  const mbSrc = get(leaf.dict, 'MediaBox') ?? leaf.inh.MediaBox
+  const mbRes = isRef(mbSrc) ? deref(doc, mbSrc) : mbSrc
+  const mb = Array.isArray(mbRes) ? mbRes : [0, 0, 612, 792]
+  const rotSrc = get(leaf.dict, 'Rotate') ?? leaf.inh.Rotate ?? 0
+  const rot = typeof rotSrc === 'number' ? ((rotSrc % 360) + 360) % 360 : 0
+  const w = mb[2] - mb[0]
+  const hgt = mb[3] - mb[1]
+  const box = { w: rot % 180 === 0 ? w : hgt, h: rot % 180 === 0 ? hgt : w }
+  const disp = displayTransform(mb, rot)
+  const empty = { ops: [], box }
+  if (!data) return empty
+
+  const fonts = await fontMap(doc, leaf)
+  const resSrc = get(leaf.dict, 'Resources') ?? leaf.inh.Resources
+  const res = isRef(resSrc) ? deref(doc, resSrc) : resSrc
+  const xoSrc = res instanceof Map ? get(res, 'XObject') : null
+  const xo = isRef(xoSrc) ? deref(doc, xoSrc) : xoSrc
+
+  const ops = []
+  let ctm = [1, 0, 0, 1, 0, 0]
+  const gstack = []
+  let tm = [1, 0, 0, 1, 0, 0], tlm = [1, 0, 0, 1, 0, 0]
+  let leading = 0, fontSize = 0, curFont = null, tc = 0, tw = 0, tz = 1
+  const pathRects = []
+
+  const imgObj = (nm) => {
+    if (!(xo instanceof Map)) return null
+    let xv = xo.get(nm)
+    if (isRef(xv)) xv = deref(doc, xv)
+    return isStream(xv) && get(xv.dict, 'Subtype')?.v === 'Image' ? xv : null
+  }
+  const imgKey = (nm) => {
+    const v = xo instanceof Map ? xo.get(nm) : null
+    return isRef(v) ? `${v.n} ${v.g}` : `inline:${nm}`
+  }
+  const fontOf = () => (curFont && fonts.get(curFont)) || null
+
+  const advance = (bytes, font) => {
+    if (!font) return bytes.length * 0.5 * fontSize * tz
+    let sum = 0
+    const cl = font.tounicode?.codeLen ?? 1
+    for (let i = 0; i + cl <= bytes.length; i += cl) {
+      let code = 0
+      for (let k = 0; k < cl; k++) code = code * 256 + bytes[i + k]
+      const wv = font.wRanges?.get(code) ?? font.widths?.[code - font.firstChar]
+      sum += (typeof wv === 'number' ? wv : 500) / 1000
+    }
+    return sum * fontSize * tz
+  }
+
+  const emitText = (bytes) => {
+    const font = fontOf()
+    const str = decodeString(bytes, font)
+    const ncodes = font?.tounicode ? Math.floor(bytes.length / font.tounicode.codeLen) : bytes.length
+    const adv = advance(bytes, font) + tw * (str.split(' ').length - 1) + tc * ncodes
+    const m = matMul(ctm, tm)
+    const [ux, uy] = matPt(m, 0, 0)
+    const [dx, dy] = matPt(disp, ux, uy)
+    // baseline direction + advance vector through the same transform
+    const [ux2, uy2] = matPt(m, adv, 0)
+    const [dx2, dy2] = matPt(disp, ux2, uy2)
+    const dspW = Math.hypot(dx2 - dx, dy2 - dy)
+    const ang = Math.atan2(dy2 - dy, dx2 - dx)
+    const hh = Math.hypot(m[2], m[3]) * fontSize
+    ops.push({
+      t: 'text', x: dx, y: dy, w: dspW, h: hh, rot: ang,
+      str: garbageRatio(str) < 0.4 ? str : '', size: fontSize * Math.hypot(m[0], m[1]),
+    })
+    // advance the text matrix in TEXT space: Tm' = Tm × T(adv,0)
+    tm = matMul(tm, [1, 0, 0, 1, adv, 0])
+  }
+
+  for (const { op, operands } of tokenizeContent(data)) {
+    switch (op) {
+      case 'q': gstack.push({ ctm, tm, tlm }); break
+      case 'Q': { const s = gstack.pop(); if (s) ({ ctm, tm, tlm } = s); break }
+      case 'cm': if (operands.length === 6) ctm = matMul(operands.map(Number), ctm); break
+      case 'BT': tm = [1, 0, 0, 1, 0, 0]; tlm = [...tm]; break
+      case 'ET': break
+      case 'Tf': {
+        const nm = operands.find((o) => o.t === 'name')
+        const sz = operands.find((o) => typeof o === 'number')
+        if (nm) curFont = nm.v
+        if (sz !== undefined) fontSize = sz
+        break
+      }
+      case 'Td': case 'TD': {
+        const [tx, ty] = [Number(operands[0]) || 0, Number(operands[1]) || 0]
+        if (op === 'TD') leading = -ty
+        // Tlm' = Tlm × T(tx,ty) — offset in text space, not user space
+        tlm = matMul(tlm, [1, 0, 0, 1, tx, ty])
+        tm = [...tlm]
+        break
+      }
+      case 'T*': tlm = matMul(tlm, [1, 0, 0, 1, 0, -leading]); tm = [...tlm]; break
+      case 'TL': leading = Number(operands[0]) || 0; break
+      case 'Tm': if (operands.length === 6) { tm = operands.map(Number); tlm = [...tm] } break
+      case 'Tc': tc = Number(operands[0]) || 0; break
+      case 'Tw': tw = Number(operands[0]) || 0; break
+      case 'Tz': tz = (Number(operands[0]) || 100) / 100; break
+      case 'Tj': case "'": case '"': {
+        if (op === "'" || op === '"') { tlm = matMul(tlm, [1, 0, 0, 1, 0, -leading]); tm = [...tlm] }
+        const s = [...operands].reverse().find((o) => o.t === 'str')
+        if (s) emitText(s.bytes)
+        break
+      }
+      case 'TJ': {
+        const arr = operands.find((o) => o.t === 'arr')
+        if (!arr) break
+        for (const it of arr.items) {
+          if (it.t === 'str') emitText(it.bytes)
+          else if (typeof it === 'number') {
+            // kerning adjust: negative moves forward, in thousandths of em
+            tm[4] += (-it / 1000) * fontSize * tz
+          }
+        }
+        break
+      }
+      case 'Do': {
+        const nm = [...operands].reverse().find((o) => o.t === 'name')
+        if (!nm) break
+        if (imgObj(nm.v)) {
+          const corners = [[0, 0], [1, 0], [1, 1], [0, 1]].map(([x, y]) => matPt(disp, ...matPt(ctm, x, y)))
+          const xs = corners.map((c) => c[0]), ys = corners.map((c) => c[1])
+          ops.push({ t: 'img', x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys), rot: 0, key: imgKey(nm.v), ref: imgObj(nm.v) })
+        }
+        break
+      }
+      case 're': {
+        const [rx, ry, rw, rh] = operands.map(Number)
+        if ([rx, ry, rw, rh].every(Number.isFinite)) pathRects.push([rx, ry, rw, rh])
+        break
+      }
+      case 'f': case 'F': case 'f*': case 'S': case 's': case 'B': case 'b': {
+        for (const [rx, ry, rw, rh] of pathRects) {
+          const corners = [[rx, ry], [rx + rw, ry], [rx + rw, ry + rh], [rx, ry + rh]].map(([x, y]) => matPt(disp, ...matPt(ctm, x, y)))
+          const xs = corners.map((c) => c[0]), ys = corners.map((c) => c[1])
+          ops.push({ t: 'rect', x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys), stroke: op === 'S' || op === 's' })
+        }
+        pathRects.length = 0
+        break
+      }
+      case 'n': pathRects.length = 0; break
+    }
+  }
+  return { ops, box }
 }
 
 // ---------- extract images ----------
@@ -598,7 +929,7 @@ export function unPredict(data, { predictor = 1, columns = 1, colors = 1, bpc = 
  * Applies the full /Filter chain in order; a trailing image codec (DCT/JPX)
  * names the format, everything else is unwrapped as compression.
  */
-async function decodeImageStream(doc, v) {
+export async function decodeImageStream(doc, v) {
   const w = get(v.dict, 'Width') ?? 0
   const h = get(v.dict, 'Height') ?? 0
   const filterVal = get(v.dict, 'Filter')
@@ -650,7 +981,7 @@ export async function extractImages(bytes) {
     const w = get(v.dict, 'Width') ?? 0
     const h = get(v.dict, 'Height') ?? 0
     const dec = await decodeImageStream(doc, v).catch(() => null)
-    if (dec) images.push({ name: `image-${i}-${w}x${h}${dec.ext}`, data: dec.data, w, h, mime: dec.mime })
+    if (dec) images.push({ name: `image-${i}-${w}x${h}${dec.ext}`, data: dec.data, w, h, mime: dec.mime, hash: crc32(dec.data) >>> 0 })
     else skipped++
   }
   return { images, skipped }

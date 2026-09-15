@@ -7,7 +7,7 @@ const POSITIONS = [
   ['tc', 'Top center'], ['tl', 'Top left'], ['tr', 'Top right'],
 ]
 const FORMATS = [
-  ['n-of-total', '1 / 12'], ['n', '1'], ['page-n', 'Page 1'],
+  ['n-of-total', '1 / 12'], ['n', '1'], ['page-n', 'Page 1'], ['custom', 'Custom…'],
 ]
 
 export function PageNums() {
@@ -16,12 +16,15 @@ export function PageNums() {
   let pages = 0
   let pos = 'bc'
   let fmt = 'n-of-total'
+  let fmtStr = '{n} / {t}'
   let start = 1
   let size = 10
+  let margin = 18
   let skipFirst = false
   let busy = false
   let error = ''
   let loadGen = 0
+  let previewEl = null
   const root = h('div', { class: 'tool' })
 
   const load = async ([f]) => {
@@ -51,7 +54,7 @@ export function PageNums() {
     error = ''
     render()
     try {
-      const out = await addPageNumbers(bytes, { pos, fmt, start, size, skipFirst })
+      const out = await addPageNumbers(bytes, { pos, fmt, fmtStr, start, size, margin, skipFirst })
       saveBlob(new Blob([out], { type: 'application/pdf' }), `${file.name.replace(/\.pdf$/i, '')}-numbered.pdf`)
     } catch (e) {
       error = e.message || 'failed'
@@ -76,9 +79,12 @@ export function PageNums() {
 
   const previewLabel = () => {
     const n = (skipFirst ? 1 : 0) + start
-    const shown = fmt === 'n' ? `${n}` : fmt === 'page-n' ? `Page ${n}` : `${n} / ${pages}`
+    const shown = fmt === 'n' ? `${n}`
+      : fmt === 'page-n' ? `Page ${n}`
+      : fmt === 'custom' ? (fmtStr || '{n}').replaceAll('{n}', String(n)).replaceAll('{t}', String(pages))
+      : `${n} / ${pages}`
     const where = POSITIONS.find(([v]) => v === pos)[1].toLowerCase()
-    return `Preview: "${shown}" · ${where} · ${size}pt Helvetica${skipFirst ? ' · page 1 left blank' : ''}`
+    return `Preview: "${shown}" · ${where} · ${size}pt · ${margin}pt margin${skipFirst ? ' · page 1 left blank' : ''}`
   }
 
   function render() {
@@ -93,11 +99,33 @@ export function PageNums() {
               h('div', {}, h('label', { class: 'lbl' }, 'Start at'), numin(start, 0, 9999, (v) => (start = v))),
               h('div', {}, h('label', { class: 'lbl' }, 'Size (pt)'), numin(size, 6, 48, (v) => (size = v))),
             ),
+            fmt === 'custom'
+              ? h('div', { class: 'optrow' },
+                  h('div', { style: { flex: 1 } },
+                    h('label', { class: 'lbl' }, 'Custom label — {n} = number, {t} = total'),
+                    h('input', { class: 'textin', value: fmtStr, oninput: (e) => {
+                      fmtStr = e.target.value
+                      if (previewEl) previewEl.textContent = previewLabel()
+                    } })),
+                )
+              : null,
+            h('div', { class: 'optrow' },
+              h('div', { style: { flex: 1 } },
+                h('label', { class: 'lbl' }, `Margin — ${margin}pt`),
+                h('input', {
+                  type: 'range', min: 0, max: 72, step: 1, value: margin, class: 'slider',
+                  oninput: (e) => {
+                    margin = +e.target.value
+                    e.target.previousElementSibling.textContent = `Margin — ${margin}pt`
+                    if (previewEl) previewEl.textContent = previewLabel()
+                  },
+                })),
+            ),
             h('label', { class: 'radio', style: { marginBottom: '10px' } },
               h('input', { type: 'checkbox', checked: skipFirst || undefined, onchange: (e) => { skipFirst = e.target.checked; render() } }),
               'Skip first page (covers/title pages stay clean)',
             ),
-            h('p', { class: 'meta dim' }, previewLabel()),
+            (previewEl = h('p', { class: 'meta dim' }, previewLabel())),
           )
         : null,
       ErrorText(error),

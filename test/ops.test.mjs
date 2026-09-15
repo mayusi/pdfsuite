@@ -5,9 +5,10 @@ import { parsePdf, deref } from '../src/pdf/parse.js'
 import { enc, get, isStream, name, ref, set, stream, typeIs } from '../src/pdf/types.js'
 import { newDoc, writeDoc } from '../src/pdf/write.js'
 import {
-  addPageNumbers, extractImages, extractPages, imagesToPdf, jpegInfo, mergePdfs,
+  addPageNumbers, collectDrawOps, decodeString, displayTransform, extractImages,
+  extractPages, fontMap, imagesToPdf, jpegInfo, mergePdfs,
   organizePages, pageCount, pageDims, pageLeaves, pagePreview, parseRanges,
-  readMetadata, scrubPdf, splitPdf, tokenizeContent, unPredict,
+  parseToUnicode, readMetadata, scrubPdf, splitPdf, tokenizeContent, unPredict,
 } from '../src/pdf/ops.js'
 import { crc32, zipStore } from '../src/zip.js'
 import { pngEncode, zlibStore } from '../src/png.js'
@@ -447,13 +448,22 @@ describe('qol engine', () => {
   })
 
   it('addPageNumbers counter-rotates the stamp on rotated pages', async () => {
+    // 100×400 page shown rotated 90° → "bc" lands on the user's right edge,
+    // mid-height, text advancing along +y (upright in display space).
     const out = await addPageNumbers(classicPdf([100], { rotate: [90] }), { pos: 'bc' })
     const doc = await parsePdf(out)
     const leaf = pageLeaves(doc)[0]
     const contents = get(leaf.dict, 'Contents')
     const lastRef = Array.isArray(contents) ? contents[contents.length - 1] : contents
     const text = new TextDecoder('latin1').decode(deref(doc, lastRef).data)
-    assert.match(text, /q 0 1 -1 0 [\d.]+ [\d.]+ cm/)
+    assert.match(text, /q 0 1 -1 0 82\.0 187\.5 cm/)
+    // 270° → user's left edge, text advancing −y.
+    const out2 = await addPageNumbers(classicPdf([100], { rotate: [270] }), { pos: 'bc' })
+    const doc2 = await parsePdf(out2)
+    const c2 = get(pageLeaves(doc2)[0].dict, 'Contents')
+    const last2 = Array.isArray(c2) ? c2[c2.length - 1] : c2
+    const text2 = new TextDecoder('latin1').decode(deref(doc2, last2).data)
+    assert.match(text2, /q 0 -1 1 0 18\.0 212\.5 cm/)
   })
 
   it('scrubPdf drops page annotations carrying author data', async () => {
@@ -614,5 +624,192 @@ describe('zipStore', () => {
 
   it('crc32 matches known vector', () => {
     assert.equal(crc32(enc('hello')), 0x3610a686)
+  })
+})
+
+// ---------- page renderer engine ----------
+
+/** PDF with a CID/ToUnicode font, a painted image, a filled rect, and (opt) rotation. */
+function richPdf({ rotate = 0, cid = false } = {}) {
+  const dst = newDoc()
+  const pagesNum = dst.alloc()
+  const jpgNum = dst.alloc()
+  dst.set(jpgNum, stream(new Map([
+    ['Type', name('XObject')], ['Subtype', name('Image')],
+    ['Width', 4], ['Height', 4], ['ColorSpace', name('DeviceRGB')],
+    ['BitsPerComponent', 8], ['Filter', name('DCTDecode')], ['Length', 5],
+  ]), new Uint8Array([0xff, 0xd8, 0xff, 0xd9, 7])))
+  const fontDict = new Map([
+    ['Type', name('Font')], ['Subtype', name(cid ? 'Type0' : 'Type1')],
+    ['BaseFont', name('Helvetica')],
+  ])
+  if (cid) {
+    const cmap = `/CIDInit /ProcSet findresource begin
+12 dict begin
+begincmap
+/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def
+/CMapName /Adobe-Identity-UCS def
+/CMapType 2 def
+1 begincodespacerange
+<0000> <FFFF>
+endcodespacerange
+2 beginbfchar
+<0001> <0627>
+<0002> <0644>
+endbfchar
+1 beginbfrange
+<0003> <0004> <0645>
+endbfrange
+endcmap
+CMapName currentdict /CMap defineresource pop
+end
+end`
+    const cmapNum = dst.alloc()
+    dst.set(cmapNum, stream(new Map([['Filter', name('FlateDecode')]]), deflateSync(enc(cmap))))
+    fontDict.set('ToUnicode', ref(cmapNum))
+  }
+  const fontNum = dst.alloc()
+  dst.set(fontNum, fontDict)
+  const show = cid ? '<0001> Tj <0002> Tj <00030004> Tj' : '(Hi) Tj'
+  const csNum = dst.alloc()
+  dst.set(csNum, stream(new Map(), enc(
+    `q 200 0 0 100 50 60 cm /Im0 Do Q 50 50 100 20 re f BT /F1 12 Tf 60 700 Td ${show} ET`,
+  )))
+  const pageNum = dst.alloc()
+  const pd = new Map([
+    ['Type', name('Page')], ['Parent', ref(pagesNum)], ['MediaBox', [0, 0, 612, 792]],
+    ['Contents', ref(csNum)],
+    ['Resources', new Map([
+      ['Font', new Map([['F1', ref(fontNum)]])],
+      ['XObject', new Map([['Im0', ref(jpgNum)]])],
+    ])],
+  ])
+  if (rotate) pd.set('Rotate', rotate)
+  dst.set(pageNum, pd)
+  dst.set(pagesNum, new Map([['Type', name('Pages')], ['Kids', [ref(pageNum)]], ['Count', 1]]))
+  const catNum = dst.alloc()
+  dst.set(catNum, new Map([['Type', name('Catalog')], ['Pages', ref(pagesNum)]]))
+  return writeDoc(dst, catNum)
+}
+
+describe('renderer engine', () => {
+  it('parseToUnicode maps bfchar and bfrange codes', () => {
+    const { map, codeLen } = parseToUnicode(enc(
+      'x 1 begincodespacerange <0000> <FFFF> endcodespacerange ' +
+      '1 beginbfchar <0009> <0041> endbfchar ' +
+      '1 beginbfrange <0010> <0012> <0061> endbfrange ' +
+      '1 beginbfrange <0020> <0021> [<0078> <0079>] endbfrange x',
+    ))
+    assert.equal(codeLen, 2)
+    assert.equal(map.get(9), 'A')
+    assert.equal(map.get(0x10), 'a')
+    assert.equal(map.get(0x12), 'c')
+    assert.equal(map.get(0x20), 'x')
+    assert.equal(map.get(0x21), 'y')
+  })
+
+  it('collectDrawOps positions image, text and rect in display space', async () => {
+    const doc = await parsePdf(richPdf())
+    const { ops, box } = await collectDrawOps(doc, pageLeaves(doc)[0])
+    assert.deepEqual(box, { w: 612, h: 792 })
+    const img = ops.find((o) => o.t === 'img')
+    assert.ok(img)
+    assert.ok(Math.abs(img.x - 50) < 0.5 && Math.abs(img.w - 200) < 0.5, `img rect ${JSON.stringify(img)}`)
+    assert.ok(Math.abs(img.y - (792 - 160)) < 0.5 && Math.abs(img.h - 100) < 0.5)
+    const txt = ops.find((o) => o.t === 'text')
+    assert.ok(txt)
+    assert.equal(txt.str, 'Hi')
+    assert.ok(Math.abs(txt.x - 60) < 0.5 && Math.abs(txt.y - 92) < 0.5, `text pos ${JSON.stringify(txt)}`)
+    assert.ok(Math.abs(txt.w - 12) < 6) // ~0.5em advance fallback
+    const rect = ops.find((o) => o.t === 'rect')
+    assert.ok(rect)
+    assert.ok(Math.abs(rect.x - 50) < 0.5 && Math.abs(rect.y - (792 - 70)) < 0.5)
+    assert.ok(Math.abs(rect.w - 100) < 0.5 && Math.abs(rect.h - 20) < 0.5)
+  })
+
+  it('collectDrawOps respects /Rotate', async () => {
+    const doc = await parsePdf(richPdf({ rotate: 90 }))
+    const { ops, box } = await collectDrawOps(doc, pageLeaves(doc)[0])
+    assert.deepEqual(box, { w: 792, h: 612 })
+    const txt = ops.find((o) => o.t === 'text')
+    // user (60,700) → display (700,60) under 90° clockwise
+    assert.ok(Math.abs(txt.x - 700) < 0.5 && Math.abs(txt.y - 60) < 0.5, `rot90 ${JSON.stringify(txt)}`)
+  })
+
+  it('decodeString resolves CID codes through ToUnicode', async () => {
+    const doc = await parsePdf(richPdf({ cid: true }))
+    const fonts = await fontMap(doc, pageLeaves(doc)[0])
+    const f1 = fonts.get('F1')
+    assert.equal(decodeString(new Uint8Array([0, 1]), f1), 'ا') // alef
+    assert.equal(decodeString(new Uint8Array([0, 3, 0, 4]), f1), 'من') // meem+noon via bfrange
+    const prev = await pagePreview(doc, pageLeaves(doc)[0])
+    assert.ok(prev.text.includes('ا'), `preview text: ${prev.text}`)
+    const { ops } = await collectDrawOps(doc, pageLeaves(doc)[0])
+    const strs = ops.filter((o) => o.t === 'text').map((o) => o.str).join('')
+    assert.ok(strs.includes('ال'), `collected text: ${strs}`)
+  })
+
+  it('tokenizer skips BI/ID/EI inline image payload', () => {
+    const data = enc('BI /W 2 /H 2 /CS /DeviceGray /BPC 8 ID ')
+    const imgBytes = new Uint8Array([0x00, 0x02, 0xff, 0x10])
+    const tail = enc(' EI BT /F1 12 Tf 10 20 Td (A) Tj ET')
+    const buf = new Uint8Array(data.length + imgBytes.length + tail.length)
+    buf.set(data, 0); buf.set(imgBytes, data.length); buf.set(tail, data.length + imgBytes.length)
+    const ops = tokenizeContent(buf)
+    const opNames = ops.map((o) => o.op)
+    assert.ok(opNames.includes('ID'), `ops: ${opNames}`)
+    assert.ok(opNames.includes('EI'))
+    const tj = ops.find((o) => o.op === 'Tj')
+    assert.ok(tj, 'Tj after inline image must survive')
+  })
+
+  it('displayTransform maps corners per rotation', () => {
+    const mb = [0, 0, 612, 792]
+    const pt = (m, x, y) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]]
+    assert.deepEqual(pt(displayTransform(mb, 0), 0, 0), [0, 792])
+    assert.deepEqual(pt(displayTransform(mb, 90), 0, 0), [0, 0]) // BL → TL (clockwise)
+    assert.deepEqual(pt(displayTransform(mb, 180), 0, 0), [612, 0])
+    assert.deepEqual(pt(displayTransform(mb, 270), 0, 0), [792, 612])
+  })
+})
+
+describe('powerup engine', () => {
+  it('organizePages duplicates a page when picked twice', async () => {
+    const out = await organizePages(classicPdf([100, 200, 300]), [{ page: 2 }, { page: 2 }, { page: 1 }])
+    const doc = await parsePdf(out)
+    assert.equal(pageLeaves(doc).length, 3)
+    const dims = pageDims(doc)
+    assert.deepEqual(dims.map((d) => d.w), [200, 200, 100])
+  })
+
+  it('imagesToPdf honours a4/landscape/margin options', async () => {
+    const fake = new Uint8Array([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x02, 0x58, 0x03, 0x20, 0x03, 0xff, 0xda])
+    const out = imagesToPdf([{ data: fake }], { size: 'a4', orient: 'auto', margin: 18 })
+    const doc = await parsePdf(out)
+    const leaf = pageLeaves(doc)[0]
+    const mb = get(leaf.dict, 'MediaBox')
+    // 800×600 image → landscape A4
+    assert.ok(Math.abs(mb[2] - 841.89) < 0.5, `pw ${mb[2]}`)
+    assert.ok(Math.abs(mb[3] - 595.28) < 0.5, `ph ${mb[3]}`)
+  })
+
+  it('extractImages tags identical content with the same hash', async () => {
+    const dst = newDoc()
+    const pagesNum = dst.alloc()
+    const jpg = new Uint8Array([0xff, 0xd8, 0xff, 0xd9])
+    const mk = () => { const n = dst.alloc(); dst.set(n, stream(new Map([
+      ['Type', name('XObject')], ['Subtype', name('Image')],
+      ['Width', 4], ['Height', 4], ['ColorSpace', name('DeviceRGB')],
+      ['BitsPerComponent', 8], ['Filter', name('DCTDecode')], ['Length', jpg.length],
+    ]), jpg)); return n }
+    mk(); mk()
+    const pg = dst.alloc()
+    dst.set(pg, new Map([['Type', name('Page')], ['Parent', ref(pagesNum)], ['MediaBox', [0, 0, 10, 10]]]))
+    dst.set(pagesNum, new Map([['Type', name('Pages')], ['Kids', [ref(pg)]], ['Count', 1]]))
+    const cat = dst.alloc()
+    dst.set(cat, new Map([['Type', name('Catalog')], ['Pages', ref(pagesNum)]]))
+    const { images } = await extractImages(writeDoc(dst, cat))
+    assert.equal(images.length, 2)
+    assert.equal(images[0].hash, images[1].hash)
   })
 })

@@ -39,6 +39,7 @@ const ICONS = {
   layers: 'M12 3 2 9l10 6 10-6zM4 12.5 12 17l8-4.5M4 16.5 12 21l8-4.5',
   hash: 'M9 4 7 20M17 4l-2 16M4 9h17M3 15h17',
   eraser: 'M7 19h14M9 19 3.5 13.5a2 2 0 0 1 0-2.8l8.2-8.2a2 2 0 0 1 2.8 0l6 6a2 2 0 0 1 0 2.8L13 19',
+  zoom: 'M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM16.5 16.5 21 21M11 8v6M8 11h6',
 }
 
 export function icon(name, cls = 'icon') {

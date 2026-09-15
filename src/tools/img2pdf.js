@@ -20,6 +20,7 @@ export function ImgToPdf() {
   let files = [] // {file, url, dims}
   let busy = false
   let error = ''
+  let opts = { size: 'native', orient: 'auto', margin: 0, fit: 'contain' }
   const root = h('div', { class: 'tool' })
 
   const add = async (incoming) => {
@@ -56,7 +57,7 @@ export function ImgToPdf() {
     render()
     try {
       const images = await Promise.all(files.map(async (f) => ({ data: await toJpeg(f.file) })))
-      const out = imagesToPdf(images)
+      const out = imagesToPdf(images, opts)
       saveBlob(new Blob([out], { type: 'application/pdf' }), 'images.pdf')
     } catch (e) {
       error = e.message || 'failed — use JPEG or PNG images'
@@ -77,7 +78,34 @@ export function ImgToPdf() {
       files.length
         ? Card(
             ThumbList({ files, onMove: move, onRemove: remove }),
-            h('p', { class: 'meta dim', style: { marginTop: '10px' } }, 'Drag to reorder — each image becomes one page at native size'),
+            h('p', { class: 'meta dim', style: { marginTop: '10px' } }, 'Drag to reorder — each image becomes one page'),
+          )
+        : null,
+      files.length
+        ? Card(
+            h('div', { class: 'optrow' },
+              h('label', { class: 'lbl' }, 'Page size'),
+              h('select', { class: 'textin sel', onchange: (e) => { opts = { ...opts, size: e.target.value } } },
+                h('option', { value: 'native', selected: true }, 'Match image'),
+                h('option', { value: 'a4' }, 'A4'),
+                h('option', { value: 'letter' }, 'Letter')),
+              h('label', { class: 'lbl' }, 'Orientation'),
+              h('select', { class: 'textin sel', onchange: (e) => { opts = { ...opts, orient: e.target.value } } },
+                h('option', { value: 'auto', selected: true }, 'Auto'),
+                h('option', { value: 'portrait' }, 'Portrait'),
+                h('option', { value: 'landscape' }, 'Landscape')),
+            ),
+            h('div', { class: 'optrow' },
+              h('label', { class: 'lbl' }, `Margin ${opts.margin}pt`),
+              h('input', {
+                type: 'range', min: 0, max: 72, step: 1, value: opts.margin, class: 'slider',
+                oninput: (e) => { opts = { ...opts, margin: +e.target.value }; e.target.previousElementSibling.textContent = `Margin ${opts.margin}pt` },
+              }),
+              h('label', { class: 'lbl' }, 'Fit'),
+              h('select', { class: 'textin sel', onchange: (e) => { opts = { ...opts, fit: e.target.value } } },
+                h('option', { value: 'contain', selected: true }, 'Fit (keep ratio)'),
+                h('option', { value: 'stretch' }, 'Stretch to page')),
+            ),
           )
         : null,
       ErrorText(error),

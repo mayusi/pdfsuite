@@ -1,7 +1,8 @@
 import { h, setKids, readBytes, saveBlob } from '../ui/dom.js'
-import { Btn, Card, DropZone, ErrorText, SelectGrid, Toolbar } from '../ui/widgets.js'
+import { Btn, Card, DropZone, ErrorText, SelectGrid, Toolbar, openLightbox } from '../ui/widgets.js'
 import { parsePdf } from '../pdf/parse.js'
 import { extractPages, pageDims, pageLeaves, pagePreview, parseRanges, splitPdf } from '../pdf/ops.js'
+import { renderPage } from '../pdf/render.js'
 import { zipStore } from '../zip.js'
 
 /** Selected set → "1-3, 5" spec string. */
@@ -20,7 +21,9 @@ const selToSpec = (sel) => {
 export function Split() {
   let file = null
   let bytes = null
-  let items = [] // {page, w, h}
+  let doc = null
+  let leaves = []
+  let items = [] // {page, w, h, canvas, imgUrl, text}
   let selected = new Set()
   let lastPick = null // for shift-click ranges
   let spec = ''
@@ -30,6 +33,7 @@ export function Split() {
   let error = ''
   let loadGen = 0
   let urls = []
+  const imgCache = new Map()
   const root = h('div', { class: 'tool' })
 
   const load = async ([f]) => {
@@ -41,30 +45,39 @@ export function Split() {
     lastPick = null
     spec = ''
     specOK = true
+    imgCache.clear()
     for (const u of urls) URL.revokeObjectURL(u)
     urls = []
     render()
     try {
       const b = await readBytes(f)
       if (my !== loadGen) return
-      const doc = await parsePdf(b)
+      const d = await parsePdf(b)
       if (my !== loadGen) return
       bytes = b
-      const leaves = pageLeaves(doc)
-      const dims = pageDims(doc)
-      items = dims.map((d, i) => ({ page: i + 1, w: d.w, h: d.h, imgUrl: null, text: '' }))
+      doc = d
+      leaves = pageLeaves(d)
+      const dims = pageDims(d)
+      items = dims.map((d2, i) => ({ page: i + 1, w: d2.w, h: d2.h, canvas: null, imgUrl: null, text: '' }))
       selected = new Set(items.map((i) => i.page))
       spec = selToSpec(selected)
       render()
       leaves.forEach(async (leaf, i) => {
         try {
-          const pv = await pagePreview(doc, leaf)
+          const canvas = await renderPage(d, leaf, { width: 200, cache: imgCache })
           if (my !== loadGen) return
-          if (pv.img) {
-            items[i].imgUrl = URL.createObjectURL(new Blob([pv.img.data], { type: pv.img.mime }))
-            urls.push(items[i].imgUrl)
+          if (canvas) {
+            canvas.className = 'pcanvas'
+            items[i].canvas = canvas
           } else {
-            items[i].text = pv.text
+            const pv = await pagePreview(d, leaf)
+            if (my !== loadGen) return
+            if (pv.img) {
+              items[i].imgUrl = URL.createObjectURL(new Blob([pv.img.data], { type: pv.img.mime }))
+              urls.push(items[i].imgUrl)
+            } else {
+              items[i].text = pv.text
+            }
           }
           render()
         } catch { /* card keeps dims */ }
@@ -74,8 +87,17 @@ export function Split() {
       error = e.message || 'could not read that PDF'
       file = null
       bytes = null
+      doc = null
     }
     render()
+  }
+
+  const zoom = async (page) => {
+    try {
+      const it = items[page - 1]
+      const canvas = await renderPage(doc, leaves[page - 1], { width: Math.min(860, it.w * 1.5), cache: imgCache })
+      if (canvas) openLightbox(canvas, `page ${page} · ${it.w}×${it.h}pt`)
+    } catch { /* no preview */ }
   }
 
   const toggle = (page, shift) => {
@@ -118,7 +140,7 @@ export function Split() {
     if (btnEl) btnEl.disabled = busy || !specOK || !selected.size
     // hot-swap only the grid — full render() would nuke input focus mid-typing
     if (specOK && gridEl) {
-      const fresh = SelectGrid({ items, selected, onToggle: toggle })
+      const fresh = SelectGrid({ items, selected, onToggle: toggle, onZoom: zoom })
       gridEl.replaceWith(fresh)
       gridEl = fresh
     }
@@ -129,12 +151,23 @@ export function Split() {
     error = ''
     render()
     try {
-      const ranges = parseRanges(spec, items.length)
       const stem = file.name.replace(/\.pdf$/i, '')
       if (mode === 'one') {
+        const ranges = parseRanges(spec, items.length)
         const out = await extractPages(bytes, ranges)
         saveBlob(new Blob([out], { type: 'application/pdf' }), `${stem}-pages.pdf`)
+      } else if (mode === 'each') {
+        const pgs = [...selected].sort((a, b) => a - b)
+        const outs = await splitPdf(bytes, pgs.map((p) => ({ from: p, to: p })))
+        saveBlob(
+          new Blob([zipStore(outs.map((out, i) => ({
+            name: `${stem}-p${pgs[i]}.pdf`,
+            data: out,
+          })))], { type: 'application/zip' }),
+          `${stem}-pages.zip`,
+        )
       } else {
+        const ranges = parseRanges(spec, items.length)
         const outs = await splitPdf(bytes, ranges)
         saveBlob(
           new Blob([zipStore(outs.map((out, i) => ({
@@ -180,7 +213,7 @@ export function Split() {
             ]),
           )
         : null,
-      items.length ? (gridEl = SelectGrid({ items, selected, onToggle: toggle })) : null,
+      items.length ? (gridEl = SelectGrid({ items, selected, onToggle: toggle, onZoom: zoom })) : null,
       file
         ? Card(
             h('label', { class: 'lbl' }, 'Ranges (synced with your picks — edit either)'),
@@ -194,6 +227,7 @@ export function Split() {
               { class: 'radio-row' },
               radio('one', 'One PDF with those pages'),
               radio('zip', 'Separate PDF per range (zip)'),
+              radio('each', 'One PDF per selected page (zip)'),
             ),
           )
         : null,

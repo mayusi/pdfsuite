@@ -174,8 +174,51 @@ main h1 { font-size: 24px; margin-top: 14px; }
 .mval { color: var(--danger); word-break: break-all; }
 
 /* option rows (pagenum) */
-.optrow { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin: 10px 0; }
+.optrow { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin: 10px 0; align-items: end; }
 .textin.sel, .textin.num { margin-bottom: 0; }
+.optrow .lbl { margin-bottom: 4px; }
+.slider { width: 100%; accent-color: var(--accent); }
+.btnrow { display: flex; gap: 10px; flex-wrap: wrap; }
+
+/* rendered canvas thumbnails */
+.pcanvas { flex: 1; width: 100%; min-height: 0; object-fit: contain; border-radius: 6px; background: #fff; pointer-events: none; }
+.pcanvas-sm { width: 100%; height: auto; border-radius: 4px; background: #fff; display: block; }
+
+/* drag insertion line */
+.pcard.drop-before { box-shadow: inset 3px 0 0 var(--accent); }
+.pcard.drop-after { box-shadow: inset -3px 0 0 var(--accent); }
+
+/* zoom button on selectable cards */
+.pzoom {
+  position: absolute; top: 6px; left: 6px; width: 24px; height: 24px; border-radius: 6px;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--border); background: rgba(9,9,11,0.8); color: var(--dim);
+  cursor: zoom-in; opacity: 0; transition: opacity 0.15s; padding: 0;
+}
+.pcard:hover .pzoom { opacity: 1; }
+.pzoom:hover { color: var(--accent); border-color: var(--accent); }
+
+/* lightbox */
+.lightbox {
+  position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center;
+  background: rgba(0,0,0,0.75); backdrop-filter: blur(3px); padding: 24px;
+}
+.lb-box { max-width: 92vw; max-height: 92vh; display: flex; flex-direction: column; gap: 8px; }
+.lb-box canvas { max-width: 92vw; max-height: 86vh; width: auto; height: auto; border-radius: 8px; background: #fff; box-shadow: 0 12px 48px rgba(0,0,0,0.6); }
+.lb-cap { text-align: center; color: var(--dim); font-size: 12px; }
+
+/* merge expandable page strip */
+.fdetail { flex-basis: 100%; margin-top: 6px; }
+.pstrip { display: flex; gap: 6px; flex-wrap: wrap; padding: 6px 2px 2px; }
+.pstrip-cell { width: 64px; display: flex; flex-direction: column; align-items: center; gap: 2px; }
+.pstrip-n { font-size: 10px; color: var(--faint); }
+
+/* extract selection */
+.icard { cursor: pointer; transition: border-color 0.12s; }
+.icard.sel { border-color: var(--accent); background: rgba(52, 211, 153, 0.07); }
+.icard .pchk { background: var(--bg); }
+.icard.sel .pchk { background: var(--accent); border-color: var(--accent); color: #052e22; }
+.toolbar .lbl input[type='checkbox'] { accent-color: var(--accent); margin-right: 5px; vertical-align: -2px; }
 
 /* footer */
 footer { margin-top: auto; padding-top: 60px; }
