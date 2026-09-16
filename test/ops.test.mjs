@@ -2,7 +2,7 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { deflateSync } from 'node:zlib'
 import { parsePdf, deref } from '../src/pdf/parse.js'
-import { enc, get, isStream, name, ref, set, stream, typeIs } from '../src/pdf/types.js'
+import { dec, enc, get, isStream, name, ref, set, stream, typeIs } from '../src/pdf/types.js'
 import { newDoc, writeDoc } from '../src/pdf/write.js'
 import {
   addPageNumbers, collectDrawOps, decodeString, displayTransform, extractImages,
@@ -128,7 +128,7 @@ describe('parser', () => {
   it('rejects encrypted pdfs', async () => {
     const head = '%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n'
     const bytes = enc(head + 'trailer\n<< /Size 2 /Root 1 0 R /Encrypt 9 0 R >>\n%%EOF\n')
-    await assert.rejects(parsePdf(bytes), /encrypted/i)
+    await assert.rejects(parsePdf(bytes), /password-protected/i)
   })
 })
 
@@ -377,8 +377,8 @@ describe('qol engine', () => {
     dst.set(catNum, new Map([['Type', name('Catalog')], ['Pages', ref(pagesNum)], ['Metadata', ref(metaNum)]]))
     const bytes = writeDoc(dst, catNum)
     const dirty = enc(new TextDecoder('latin1').decode(bytes).replace(
-      '/Root ' + catNum + ' 0 R >>',
-      `/Root ${catNum} 0 R /Info << /Author (sneaky) /Producer (acme) >> /ID [<aa><bb>] >>`,
+      '/Root ' + catNum + ' 0 R',
+      `/Root ${catNum} 0 R /Info << /Author (sneaky) /Producer (acme) >> /ID [<aa><bb>] `,
     ))
     const meta = await readMetadata(dirty)
     assert.equal(meta.xmp, true)
@@ -399,8 +399,8 @@ describe('qol engine', () => {
     const bytes = writeDoc(dst, catNum)
     // /Title <FEFF00480069> = UTF-16BE "Hi"
     const dirty = enc(new TextDecoder('latin1').decode(bytes).replace(
-      '/Root ' + catNum + ' 0 R >>',
-      `/Root ${catNum} 0 R /Info << /Title <FEFF00480069> >> >>`,
+      '/Root ' + catNum + ' 0 R',
+      `/Root ${catNum} 0 R /Info << /Title <FEFF00480069> >> `,
     ))
     const meta = await readMetadata(dirty)
     assert.equal(meta.fields.find((f) => f.key === 'Title').value, 'Hi')
@@ -811,5 +811,531 @@ describe('powerup engine', () => {
     const { images } = await extractImages(writeDoc(dst, cat))
     assert.equal(images.length, 2)
     assert.equal(images[0].hash, images[1].hash)
+  })
+})
+
+// ---------- vector/path/form walker ----------
+
+/** Page exercising rg/RG colors, m/l/c path stroke, gs alpha, W-clip, Form XObject. */
+function vectorPdf() {
+  const content =
+    'q\n1 0 0 rg\n10 10 50 30 re f\n' +
+    '0.2 0.4 0.9 RG\n2 w\n[3 2] 0 d\n' +
+    '60 60 m 80 60 l 90 90 95 95 100 100 c S\n' +
+    '/GS0 gs\n0 1 0 rg\n20 120 40 20 re f\n' +
+    '10 10 80 80 re W n\n' +
+    'BT /F1 14 Tf 30 30 Td (HELLO) Tj ET\n/Fm0 Do\nQ\n'
+  const form = 'BT /F2 9 Tf 5 5 Td (INNER) Tj ET\n'
+  const head = '%PDF-1.7\n'
+  let body = ''
+  const offs = new Map()
+  const add = (n, c) => { offs.set(n, head.length + body.length); body += `${n} 0 obj\n${c}\nendobj\n` }
+  add(1, '<< /Type /Catalog /Pages 2 0 R >>')
+  add(2, '<< /Type /Pages /Kids [3 0 R] /Count 1 >>')
+  add(3, '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] ' +
+    '/Resources << /Font << /F1 5 0 R >> /XObject << /Fm0 7 0 R >> /ExtGState << /GS0 9 0 R >> >> ' +
+    '/Contents 4 0 R >>')
+  add(4, `<< /Length ${content.length} >>\nstream\n${content}endstream`)
+  add(5, '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>')
+  add(7, `<< /Type /XObject /Subtype /Form /BBox [0 0 100 100] /Matrix [1 0 0 1 50 50] ` +
+    `/Resources << /Font << /F2 8 0 R >> >> /Length ${form.length} >>\nstream\n${form}endstream`)
+  add(8, '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>')
+  add(9, '<< /ca 0.5 /CA 0.25 >>')
+  const xrefAt = head.length + body.length
+  let xref = 'xref\n0 10\n0000000000 65535 f \r\n'
+  for (let n = 1; n < 10; n++)
+    xref += (offs.has(n) ? String(offs.get(n)).padStart(10, '0') + ' 00000 n' : '0000000000 65535 f') + ' \r\n'
+  return enc(head + body + xref +
+    `trailer\n<< /Size 10 /Root 1 0 R >>\nstartxref\n${xrefAt}\n%%EOF\n`)
+}
+
+describe('vector walker', () => {
+  it('emits path ops with stroke color/width and cubic segs', async () => {
+    const doc = await parsePdf(vectorPdf())
+    const { ops } = await collectDrawOps(doc, pageLeaves(doc)[0])
+    const path = ops.find((o) => o.t === 'path')
+    assert.ok(path, 'm/l/c + S produced a path op')
+    assert.ok(path.segs.some((seg) => seg[0] === 'C'), 'cubic seg captured')
+    assert.ok(path.stroke && !path.fill)
+    assert.ok(Math.abs(path.sc[2] - 0.9) < 1e-6, 'RG stroke color')
+    assert.ok(Math.abs(path.lw - 2) < 1e-6, 'line width')
+    assert.deepEqual(path.dash, [3, 2], 'dash pattern')
+  })
+  it('tracks fill color, gs alpha, clip/unclip, text color', async () => {
+    const doc = await parsePdf(vectorPdf())
+    const { ops } = await collectDrawOps(doc, pageLeaves(doc)[0])
+    const red = ops.find((o) => o.t === 'rect' && Math.abs(o.fc[0] - 1) < 1e-6)
+    assert.ok(red?.fill && red.a === 1, 'red rect filled at full alpha')
+    const green = ops.find((o) => o.t === 'rect' && o.fc[1] === 1)
+    assert.equal(green.a, 0.5, 'ExtGState ca applied to fill')
+    const hello = ops.find((o) => o.t === 'text' && o.str === 'HELLO')
+    assert.ok(hello, 'text op emitted')
+    assert.equal(Math.round(hello.fc[1] * 10) / 10, 1, 'text inherits fill color')
+    assert.ok(ops.filter((o) => o.t === 'clip').length >= 2, 'W clip + form BBox clip')
+    assert.ok(ops.filter((o) => o.t === 'unclip').length >= 2, 'clip ends on Q / form exit')
+  })
+  it('walks Form XObjects recursively with Matrix applied', async () => {
+    const doc = await parsePdf(vectorPdf())
+    const { ops } = await collectDrawOps(doc, pageLeaves(doc)[0])
+    const inner = ops.find((o) => o.t === 'text' && o.str === 'INNER')
+    assert.ok(inner, 'form content walked')
+    assert.ok(Math.abs(inner.x - 55) < 2, `form Matrix +50 tx applied (x=${inner.x})`)
+  })
+})
+
+// ---------- v3 tools: text/compress/protect ----------
+
+describe('crypto primitives', () => {
+  it('md5 matches RFC 1321 vectors', async () => {
+    const { md5 } = await import('../src/pdf/crypto.js')
+    const hex = (b) => [...b].map((x) => x.toString(16).padStart(2, '0')).join('')
+    assert.equal(hex(md5(enc(''))), 'd41d8cd98f00b204e9800998ecf8427e')
+    assert.equal(hex(md5(enc('abc'))), '900150983cd24fb0d6963f7d28e17f72')
+    assert.equal(
+      hex(md5(enc('The quick brown fox jumps over the lazy dog'))),
+      '9e107d9d372bb6826bd81d3542a419d6')
+  })
+  it('rc4 matches RFC 6229 vector', async () => {
+    const { rc4 } = await import('../src/pdf/crypto.js')
+    const hex = (b) => [...b].map((x) => x.toString(16).padStart(2, '0')).join('')
+    assert.equal(hex(rc4(enc('Key'), enc('Plaintext'))), 'bbf316e8d940af0ad3')
+    assert.equal(hex(rc4(enc('Wiki'), enc('pedia'))), '1021bf0420')
+  })
+})
+
+describe('pageText', () => {
+  it('reassembles lines by position', async () => {
+    const content = 'BT /F1 12 Tf 50 700 Td (First line) Tj 0 -20 Td (Second line) Tj ET\n'
+    const head = '%PDF-1.7\n'
+    let body = ''
+    const offs = new Map()
+    const add = (n, c) => { offs.set(n, head.length + body.length); body += `${n} 0 obj\n${c}\nendobj\n` }
+    add(1, '<< /Type /Catalog /Pages 2 0 R >>')
+    add(2, '<< /Type /Pages /Kids [3 0 R] /Count 1 >>')
+    add(3, '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 800] ' +
+      '/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>')
+    add(4, `<< /Length ${content.length} >>\nstream\n${content}endstream`)
+    add(5, '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>')
+    const xrefAt = head.length + body.length
+    let xref = 'xref\n0 6\n0000000000 65535 f \r\n'
+    for (let n = 1; n < 6; n++) xref += String(offs.get(n)).padStart(10, '0') + ' 00000 n \r\n'
+    const doc = await parsePdf(enc(head + body + xref +
+      `trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xrefAt}\n%%EOF\n`))
+    const { pageText } = await import('../src/pdf/ops.js')
+    const text = await pageText(doc, pageLeaves(doc)[0])
+    assert.equal(text, 'First line\nSecond line')
+  })
+})
+
+describe('compressPdf', () => {
+  it('deflates uncompressed streams and reports sizes', async () => {
+    const pad = 'BT /F1 9 Tf 10 10 Td (' + 'x'.repeat(3000) + ') Tj ET\n'
+    const head = '%PDF-1.7\n'
+    let body = ''
+    const offs = new Map()
+    const add = (n, c) => { offs.set(n, head.length + body.length); body += `${n} 0 obj\n${c}\nendobj\n` }
+    add(1, '<< /Type /Catalog /Pages 2 0 R >>')
+    add(2, '<< /Type /Pages /Kids [3 0 R] /Count 1 >>')
+    add(3, '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 300] ' +
+      '/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>')
+    add(4, `<< /Length ${pad.length} >>\nstream\n${pad}endstream`)
+    add(5, '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>')
+    const xrefAt = head.length + body.length
+    let xref = 'xref\n0 6\n0000000000 65535 f \r\n'
+    for (let n = 1; n < 6; n++) xref += String(offs.get(n)).padStart(10, '0') + ' 00000 n \r\n'
+    const src = enc(head + body + xref +
+      `trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xrefAt}\n%%EOF\n`)
+    const { compressPdf, pageText } = await import('../src/pdf/ops.js')
+    const { bytes, before, after } = await compressPdf(src)
+    assert.ok(after < before, `compressed ${before} → ${after}`)
+    const re = await parsePdf(bytes)
+    assert.equal(pageLeaves(re).length, 1)
+    const txt = await pageText(re, pageLeaves(re)[0])
+    assert.ok(txt.startsWith('xxx'), 'content still decodes after recompression')
+  })
+})
+
+describe('protectPdf/decryptPdf', () => {
+  it('encrypts strings+streams, trailer carries /Encrypt, roundtrip unlocks', async () => {
+    const { protectPdf, decryptPdf } = await import('../src/pdf/ops.js')
+    const src = classicPdf([300, 400])
+    const locked = await protectPdf(src, 'hunter2')
+    await assert.rejects(() => parsePdf(locked), /password-protected/, 'plain parse refuses encrypted docs')
+    const doc = await parsePdf(locked, [], true)
+    assert.ok(get(doc.trailer, 'Encrypt'), '/Encrypt in trailer')
+    assert.ok(get(doc.trailer, 'ID'), '/ID in trailer')
+    const unlocked = await decryptPdf(locked, 'hunter2')
+    const doc2 = await parsePdf(unlocked)
+    assert.equal(pageLeaves(doc2).length, 2, 'roundtrip preserves pages')
+    assert.equal(get(doc2.trailer, 'Encrypt'), undefined, 'unlock drops Encrypt')
+    // owner-password path also unlocks
+    const unlockedO = await decryptPdf(locked, 'hunter2')
+    assert.equal(pageLeaves(await parsePdf(unlockedO)).length, 2)
+    // wrong password throws
+    await assert.rejects(() => decryptPdf(locked, 'nope'), /wrong password/)
+  })
+})
+
+// ---------- adversarial review fixes ----------
+
+describe('review fixes', () => {
+  it('cm concatenates as ctm×operand (nested translate+scale)', async () => {
+    // scale(2) then translate(10,20): pt(1,1) → (2*(1+10), 2*(1+20)) = (22,42)
+    const dst = newDoc()
+    const pagesNum = dst.alloc()
+    const csNum = dst.alloc()
+    dst.set(csNum, stream(new Map(), enc('2 0 0 2 0 0 cm 1 0 0 1 10 20 cm 1 1 4 4 re f')))
+    const pageNum = dst.alloc()
+    dst.set(pageNum, new Map([
+      ['Type', name('Page')], ['Parent', ref(pagesNum)],
+      ['MediaBox', [0, 0, 200, 200]], ['Contents', ref(csNum)],
+    ]))
+    dst.set(pagesNum, new Map([['Type', name('Pages')], ['Kids', [ref(pageNum)]], ['Count', 1]]))
+    const catNum = dst.alloc()
+    dst.set(catNum, new Map([['Type', name('Catalog')], ['Pages', ref(pagesNum)]]))
+    const doc = await parsePdf(writeDoc(dst, catNum))
+    const { ops } = await collectDrawOps(doc, pageLeaves(doc)[0])
+    const r = ops.find((o) => o.t === 'rect')
+    // correct order: user (22,42) → display (22, 200−(42+8)) = (22,150), w=8
+    // wrong order: user (12,22) → display (12,170)
+    assert.ok(Math.abs(r.x - 22) < 0.5 && Math.abs(r.y - 150) < 0.5,
+      `cm order ${JSON.stringify(r)}`)
+  })
+
+  it('Tr 3 invisible text emits flagged ops, still extractable', async () => {
+    const dst = newDoc()
+    const pagesNum = dst.alloc()
+    const csNum = dst.alloc()
+    dst.set(csNum, stream(new Map(), enc('BT /F1 12 Tf 3 Tr 10 100 Td (HIDDEN OCR) Tj ET')))
+    const fontNum = dst.alloc()
+    dst.set(fontNum, new Map([['Type', name('Font')], ['Subtype', name('Type1')], ['BaseFont', name('Helvetica')]]))
+    const pageNum = dst.alloc()
+    dst.set(pageNum, new Map([
+      ['Type', name('Page')], ['Parent', ref(pagesNum)], ['MediaBox', [0, 0, 200, 200]],
+      ['Contents', ref(csNum)],
+      ['Resources', new Map([['Font', new Map([['F1', ref(fontNum)]])]])],
+    ]))
+    dst.set(pagesNum, new Map([['Type', name('Pages')], ['Kids', [ref(pageNum)]], ['Count', 1]]))
+    const catNum = dst.alloc()
+    dst.set(catNum, new Map([['Type', name('Catalog')], ['Pages', ref(pagesNum)]]))
+    const doc = await parsePdf(writeDoc(dst, catNum))
+    const leaf = pageLeaves(doc)[0]
+    const { ops } = await collectDrawOps(doc, leaf)
+    const t = ops.find((o) => o.t === 'text')
+    assert.equal(t.inv, true, 'invisible text flagged for painter skip')
+    assert.equal(t.str, 'HIDDEN OCR')
+    const { pageText } = await import('../src/pdf/ops.js')
+    assert.equal(await pageText(doc, leaf), 'HIDDEN OCR', 'OCR layer still extracts')
+  })
+
+  it('literal strings decode escapes, octal, and line continuation', () => {
+    // PDF source bytes: (a\nb) (\101\102) (x\<LF>y) — built raw to keep
+    // the backslashes literal in this fixture
+    const src = Uint8Array.from(
+      [...'(a' + String.fromCharCode(0x5c) + 'nb) Tj (' +
+      String.fromCharCode(0x5c) + '101' + String.fromCharCode(0x5c) + '102) Tj (x' +
+      String.fromCharCode(0x5c) + '\ny) Tj'].map((c) => c.charCodeAt(0)))
+    const ops = tokenizeContent(src)
+    const strs = ops.filter((o) => o.op === 'Tj').map((o) => o.operands[0].bytes)
+    assert.deepEqual([...strs[0]], [0x61, 0x0a, 0x62])
+    assert.deepEqual([...strs[1]], [0x41, 0x42])
+    assert.deepEqual([...strs[2]], [0x78, 0x79])
+  })
+
+  it('/W pairwise form [cid [w0 w1]] drives real advances', async () => {
+    const dst = newDoc()
+    const pagesNum = dst.alloc()
+    const fontNum = dst.alloc()
+    dst.set(fontNum, new Map([
+      ['Type', name('Font')], ['Subtype', name('Type0')], ['BaseFont', name('X')],
+      ['W', [10, [900, 100]]], // cid 10→900, cid 11→100
+      ['DW', 500],
+    ]))
+    const csNum = dst.alloc()
+    dst.set(csNum, stream(new Map(), enc('BT /F1 12 Tf 0 100 Td <000A> Tj <000B> Tj ET')))
+    const pageNum = dst.alloc()
+    dst.set(pageNum, new Map([
+      ['Type', name('Page')], ['Parent', ref(pagesNum)], ['MediaBox', [0, 0, 500, 500]],
+      ['Contents', ref(csNum)],
+      ['Resources', new Map([['Font', new Map([['F1', ref(fontNum)]])]])],
+    ]))
+    dst.set(pagesNum, new Map([['Type', name('Pages')], ['Kids', [ref(pageNum)]], ['Count', 1]]))
+    const catNum = dst.alloc()
+    dst.set(catNum, new Map([['Type', name('Catalog')], ['Pages', ref(pagesNum)]]))
+    const doc = await parsePdf(writeDoc(dst, catNum))
+    const { ops } = await collectDrawOps(doc, pageLeaves(doc)[0])
+    const texts = ops.filter((o) => o.t === 'text')
+    assert.equal(texts.length, 2)
+    // cid10 at 900/1000 em × 12pt = 10.8 advance → second glyph at x≈10.8
+    assert.ok(Math.abs(texts[1].x - 10.8) < 0.5, `advance ${JSON.stringify(texts.map((t) => t.x))}`)
+  })
+
+  it('" operator applies aw/ac spacing before moving to next line', async () => {
+    const dst = newDoc()
+    const pagesNum = dst.alloc()
+    const fontNum = dst.alloc()
+    dst.set(fontNum, new Map([
+      ['Type', name('Font')], ['Subtype', name('Type1')], ['BaseFont', name('Helvetica')],
+      ['Widths', [600, 600, 600]], ['FirstChar', 97],
+    ]))
+    const csNum = dst.alloc()
+    // 100 Tw + 5 Tc via " operator — 'a a' advances more than bare Tj would
+    dst.set(csNum, stream(new Map(), enc('BT /F1 10 Tf 14 TL 0 100 Td 100 5 (a a)" (b) Tj ET')))
+    const pageNum = dst.alloc()
+    dst.set(pageNum, new Map([
+      ['Type', name('Page')], ['Parent', ref(pagesNum)], ['MediaBox', [0, 0, 300, 300]],
+      ['Contents', ref(csNum)],
+      ['Resources', new Map([['Font', new Map([['F1', ref(fontNum)]])]])],
+    ]))
+    dst.set(pagesNum, new Map([['Type', name('Pages')], ['Kids', [ref(pageNum)]], ['Count', 1]]))
+    const catNum = dst.alloc()
+    dst.set(catNum, new Map([['Type', name('Catalog')], ['Pages', ref(pagesNum)]]))
+    const doc = await parsePdf(writeDoc(dst, catNum))
+    const { ops } = await collectDrawOps(doc, pageLeaves(doc)[0])
+    const texts = ops.filter((o) => o.t === 'text')
+    assert.equal(texts.length, 2)
+    assert.ok(texts[0].w > 36, `word+char spacing applied: w=${texts[0].w}`)
+    // " moves to next line FIRST (display y = 200 + leading 14 = 214),
+    // then shows the string — 'b' follows on the same line
+    assert.ok(Math.abs(texts[0].y - 214) < 0.5, `line advanced by leading: y=${texts[0].y}`)
+    assert.ok(Math.abs(texts[1].y - texts[0].y) < 0.5, 'Tj continues on same line')
+  })
+
+  it('TJ kerning translates in text space under rotated Tm', async () => {
+    const dst = newDoc()
+    const pagesNum = dst.alloc()
+    const fontNum = dst.alloc()
+    dst.set(fontNum, new Map([['Type', name('Font')], ['Subtype', name('Type1')], ['BaseFont', name('Helvetica')]]))
+    const csNum = dst.alloc()
+    dst.set(csNum, stream(new Map(), enc('BT /F1 10 Tf 0 1 -1 0 100 100 Tm [(A) -1000 (B)] TJ ET')))
+    const pageNum = dst.alloc()
+    dst.set(pageNum, new Map([
+      ['Type', name('Page')], ['Parent', ref(pagesNum)], ['MediaBox', [0, 0, 300, 300]],
+      ['Contents', ref(csNum)],
+      ['Resources', new Map([['Font', new Map([['F1', ref(fontNum)]])]])],
+    ]))
+    dst.set(pagesNum, new Map([['Type', name('Pages')], ['Kids', [ref(pageNum)]], ['Count', 1]]))
+    const catNum = dst.alloc()
+    dst.set(catNum, new Map([['Type', name('Catalog')], ['Pages', ref(pagesNum)]]))
+    const doc = await parsePdf(writeDoc(dst, catNum))
+    const { ops } = await collectDrawOps(doc, pageLeaves(doc)[0])
+    const texts = ops.filter((o) => o.t === 'text')
+    assert.equal(texts.length, 2)
+    // text-x points +y_user → display −? user-x advances along (0,1)_user =
+    // display (0, +1)? verify: kern must shift B's y not x
+    assert.ok(Math.abs(texts[1].x - texts[0].x) < 0.5, `rotated kern x drift ${JSON.stringify(texts)}`)
+    assert.ok(Math.abs(texts[1].y - texts[0].y) > 5, `rotated kern y advance ${JSON.stringify(texts)}`)
+  })
+
+  it('0 w stays a hairline (lw 0), not forced to 1', async () => {
+    const dst = newDoc()
+    const pagesNum = dst.alloc()
+    const csNum = dst.alloc()
+    dst.set(csNum, stream(new Map(), enc('0 w 1 1 m 50 1 l S')))
+    const pageNum = dst.alloc()
+    dst.set(pageNum, new Map([
+      ['Type', name('Page')], ['Parent', ref(pagesNum)],
+      ['MediaBox', [0, 0, 100, 100]], ['Contents', ref(csNum)],
+    ]))
+    dst.set(pagesNum, new Map([['Type', name('Pages')], ['Kids', [ref(pageNum)]], ['Count', 1]]))
+    const catNum = dst.alloc()
+    dst.set(catNum, new Map([['Type', name('Catalog')], ['Pages', ref(pagesNum)]]))
+    const doc = await parsePdf(writeDoc(dst, catNum))
+    const { ops } = await collectDrawOps(doc, pageLeaves(doc)[0])
+    const p = ops.find((o) => o.t === 'path')
+    assert.equal(p.lw, 0, 'hairline preserved')
+  })
+
+  it('decryptPdf rejects AES/non-RC4 encrypt dicts loudly', async () => {
+    const { decryptPdf } = await import('../src/pdf/ops.js')
+    const plain = classicPdf([100])
+    const txt = dec(plain)
+    const encDict = '<< /Filter /Standard /V 4 /R 4 /Length 128 /P -4 ' +
+      '/CF << /StdCF << /CFM /AESV2 /Length 16 >> >> /StmF /StdCF /StrF /StdCF ' +
+      '/O <0000000000000000000000000000000000000000000000000000000000000000> ' +
+      '/U <0000000000000000000000000000000000000000000000000000000000000000> >>'
+    const patched = txt.replace(/trailer\n<< \/Size (\d+) \/Root 1 0 R >>/,
+      `9 0 obj\n${encDict}\nendobj\ntrailer\n<< /Size $1 /Root 1 0 R /Encrypt 9 0 R /ID [<aa> <bb>] >>`)
+    assert.notEqual(patched, txt, 'fixture patched')
+    await assert.rejects(() => decryptPdf(enc(patched), 'x'), /unsupported/i)
+  })
+
+  it('decryptPdf uses SOURCE object numbers (sparse-numbered fixture)', async () => {
+    const { decryptPdf } = await import('../src/pdf/ops.js')
+    const { md5, rc4 } = await import('../src/pdf/crypto.js')
+    // replicate the Standard R3 algorithm independently — that is the point
+    const PAD = new Uint8Array([0x28, 0xbf, 0x4e, 0x5e, 0x4e, 0x75, 0x8a, 0x41, 0x64, 0x00, 0x4e, 0x56,
+      0xff, 0xfa, 0x01, 0x08, 0x2e, 0x2e, 0x00, 0xb6, 0xd0, 0x68, 0x3e, 0x80, 0x2f, 0x0c, 0xa9, 0xfe,
+      0x64, 0x53, 0x69, 0x7a])
+    const pad = (s) => {
+      const b = Uint8Array.from(s, (c) => c.charCodeAt(0))
+      const o = new Uint8Array(32)
+      o.set(b.subarray(0, 32))
+      if (b.length < 32) o.set(PAD.subarray(0, 32 - b.length), b.length)
+      return o
+    }
+    const cat2 = (ps) => {
+      const n = ps.reduce((a, p) => a + p.length, 0)
+      const o = new Uint8Array(n)
+      let i = 0
+      for (const p of ps) { o.set(p, i); i += p.length }
+      return o
+    }
+    const xk = (k, i) => Uint8Array.from(k, (b) => b ^ i)
+    const uPad = pad('sparse')
+    let d = md5(uPad)
+    for (let i = 0; i < 50; i++) d = md5(d.subarray(0, 16))
+    const oKey = d.subarray(0, 16)
+    let O = uPad
+    for (let i = 0; i < 20; i++) O = rc4(xk(oKey, i), O)
+    const id0 = new Uint8Array(16).fill(0x5a)
+    const P = -4
+    const le = new Uint8Array(4)
+    new DataView(le.buffer).setInt32(0, P, true)
+    let fd = md5(cat2([uPad, O, le, id0]))
+    for (let i = 0; i < 50; i++) fd = md5(fd.subarray(0, 16))
+    const fileKey = fd.subarray(0, 16)
+    let ud = md5(cat2([PAD, id0]))
+    for (let i = 0; i < 20; i++) ud = rc4(xk(fileKey, i), ud)
+    const U = new Uint8Array(32)
+    U.set(ud)
+    const objKeyT = (n, g) => md5(cat2([fileKey,
+      new Uint8Array([n & 255, (n >> 8) & 255, (n >> 16) & 255, g & 255, (g >> 8) & 255])])).subarray(0, 16)
+    const hexOf = (b) => [...b].map((x) => x.toString(16).padStart(2, '0')).join('')
+    const content = 'BT /F1 10 Tf 5 50 Td (SECRETS) Tj ET'
+    const encContent = rc4(objKeyT(40, 0), enc(content))
+    const pre =
+      '%PDF-1.7\n' +
+      '10 0 obj\n<< /Type /Catalog /Pages 20 0 R >>\nendobj\n' +
+      '20 0 obj\n<< /Type /Pages /Kids [30 0 R] /Count 1 >>\nendobj\n' +
+      '30 0 obj\n<< /Type /Page /Parent 20 0 R /MediaBox [0 0 100 100] /Contents 40 0 R >>\nendobj\n' +
+      `40 0 obj\n<< /Length ${encContent.length} >>\nstream\n`
+    const mid = `\nendstream\nendobj\n` +
+      `50 0 obj\n<< /Filter /Standard /V 2 /R 3 /Length 128 /P ${P} /O <${hexOf(O)}> /U <${hexOf(U)}> >>\nendobj\n`
+    const beforeXref = cat2([enc(pre), encContent, enc(mid)])
+    const xrefAt = beforeXref.length
+    const tail = 'xref\n0 51\n0000000000 65535 f \r\n' +
+      `trailer\n<< /Size 51 /Root 10 0 R /Encrypt 50 0 R /ID [<${hexOf(id0)}> <${hexOf(id0)}>] >>\n` +
+      `startxref\n${xrefAt}\n%%EOF\n`
+    const locked = cat2([beforeXref, enc(tail)])
+    // src objects are 10/20/30/40/50 — a dst-keyed walk would garble the stream
+    const unlocked = await decryptPdf(locked, 'sparse')
+    const doc = await parsePdf(unlocked)
+    const leaf = pageLeaves(doc)[0]
+    const { streamData } = await import('../src/pdf/ops.js')
+    const cs = deref(doc, get(leaf.dict, 'Contents'))
+    const plain = dec(await streamData(cs))
+    assert.ok(plain.includes('SECRETS'), `decrypted content: ${JSON.stringify(plain.slice(0, 80))}`)
+    assert.equal(get(doc.trailer, 'Encrypt'), undefined)
+  })
+
+  it('decryptPdf unpacks encrypted ObjStm containers', async () => {
+    const { decryptPdf } = await import('../src/pdf/ops.js')
+    const { md5, rc4 } = await import('../src/pdf/crypto.js')
+    const PAD = new Uint8Array([0x28, 0xbf, 0x4e, 0x5e, 0x4e, 0x75, 0x8a, 0x41, 0x64, 0x00, 0x4e, 0x56,
+      0xff, 0xfa, 0x01, 0x08, 0x2e, 0x2e, 0x00, 0xb6, 0xd0, 0x68, 0x3e, 0x80, 0x2f, 0x0c, 0xa9, 0xfe,
+      0x64, 0x53, 0x69, 0x7a])
+    const pad = (s) => {
+      const b = Uint8Array.from(s, (c) => c.charCodeAt(0))
+      const o = new Uint8Array(32)
+      o.set(b.subarray(0, 32))
+      if (b.length < 32) o.set(PAD.subarray(0, 32 - b.length), b.length)
+      return o
+    }
+    const cat2 = (ps) => {
+      const n = ps.reduce((a, p) => a + p.length, 0)
+      const o = new Uint8Array(n)
+      let i = 0
+      for (const p of ps) { o.set(p, i); i += p.length }
+      return o
+    }
+    const xk = (k, i) => Uint8Array.from(k, (b) => b ^ i)
+    const uPad = pad('os')
+    let d = md5(uPad)
+    for (let i = 0; i < 50; i++) d = md5(d.subarray(0, 16))
+    const oKey = d.subarray(0, 16)
+    let O = uPad
+    for (let i = 0; i < 20; i++) O = rc4(xk(oKey, i), O)
+    const id0 = new Uint8Array(16).fill(0x33)
+    const P = -4
+    const le = new Uint8Array(4)
+    new DataView(le.buffer).setInt32(0, P, true)
+    let fd = md5(cat2([uPad, O, le, id0]))
+    for (let i = 0; i < 50; i++) fd = md5(fd.subarray(0, 16))
+    const fileKey = fd.subarray(0, 16)
+    let ud = md5(cat2([PAD, id0]))
+    for (let i = 0; i < 20; i++) ud = rc4(xk(fileKey, i), ud)
+    const U = new Uint8Array(32)
+    U.set(ud)
+    const objKeyT = (n, g) => md5(cat2([fileKey,
+      new Uint8Array([n & 255, (n >> 8) & 255, (n >> 16) & 255, g & 255, (g >> 8) & 255])])).subarray(0, 16)
+    const hexOf = (b) => [...b].map((x) => x.toString(16).padStart(2, '0')).join('')
+    // object 60 (a page dict with a plaintext string) lives inside ObjStm 70;
+    // the container stream is encrypted with key(70,0) — inner strings are
+    // already plaintext once the container is decrypted (no per-object key)
+    const inner = '60 0 << /Type /Page /Parent 20 0 R /MediaBox [0 0 200 200] /Foo (bar) >>'
+    const packed = deflateSync(enc(inner))
+    const encStm = rc4(objKeyT(70, 0), packed)
+    const pre =
+      '%PDF-1.7\n' +
+      '10 0 obj\n<< /Type /Catalog /Pages 20 0 R >>\nendobj\n' +
+      '20 0 obj\n<< /Type /Pages /Kids [30 0 R 60 0 R] /Count 2 >>\nendobj\n' +
+      '30 0 obj\n<< /Type /Page /Parent 20 0 R /MediaBox [0 0 100 100] >>\nendobj\n' +
+      `70 0 obj\n<< /Type /ObjStm /N 1 /First 4 /Length ${encStm.length} /Filter /FlateDecode >>\nstream\n`
+    const mid = `\nendstream\nendobj\n` +
+      `50 0 obj\n<< /Filter /Standard /V 2 /R 3 /Length 128 /P ${P} /O <${hexOf(O)}> /U <${hexOf(U)}> >>\nendobj\n`
+    const beforeXref = cat2([enc(pre), encStm, enc(mid)])
+    const xrefAt = beforeXref.length
+    const tail = 'xref\n0 71\n0000000000 65535 f \r\n' +
+      `trailer\n<< /Size 71 /Root 10 0 R /Encrypt 50 0 R /ID [<${hexOf(id0)}> <${hexOf(id0)}>] >>\n` +
+      `startxref\n${xrefAt}\n%%EOF\n`
+    const unlocked = await decryptPdf(cat2([beforeXref, enc(tail)]), 'os')
+    const doc = await parsePdf(unlocked)
+    const leaves = pageLeaves(doc)
+    assert.equal(leaves.length, 2, 'ObjStm page recovered')
+    const p2 = leaves[1]
+    assert.equal(get(p2.dict, 'MediaBox')[2], 200)
+    const foo = get(p2.dict, 'Foo')
+    assert.equal(dec(foo.bytes), 'bar', 'inner string is plaintext — never re-encrypted')
+  })
+
+  it('compressPdf preserves /Info, /ID and catalog /Outlines with remapped page refs', async () => {
+    const { compressPdf } = await import('../src/pdf/ops.js')
+    const dst = newDoc()
+    const pagesNum = dst.alloc()
+    const pageNum = dst.alloc()
+    const csNum = dst.alloc()
+    const infoNum = dst.alloc()
+    const outlNum = dst.alloc()
+    dst.set(infoNum, new Map([['Title', { k: 's', bytes: enc('My Doc') }]]))
+    dst.set(outlNum, new Map([
+      ['Type', name('Outlines')], ['Count', 1],
+      ['First', new Map([['Title', { k: 's', bytes: enc('Ch1') }], ['Dest', [ref(pageNum), name('Fit')]]])],
+    ]))
+    dst.set(csNum, stream(new Map(), enc('BT /F1 10 Tf 10 50 Td (hi) Tj ET')))
+    dst.set(pageNum, new Map([
+      ['Type', name('Page')], ['Parent', ref(pagesNum)],
+      ['MediaBox', [0, 0, 100, 100]], ['Contents', ref(csNum)],
+    ]))
+    dst.set(pagesNum, new Map([['Type', name('Pages')], ['Kids', [ref(pageNum)]], ['Count', 1]]))
+    const catNum = dst.alloc()
+    dst.set(catNum, new Map([
+      ['Type', name('Catalog')], ['Pages', ref(pagesNum)], ['Outlines', ref(outlNum)],
+    ]))
+    const src = writeDoc(dst, catNum, new Map([
+      ['Info', ref(infoNum)],
+      ['ID', [{ k: 'x', bytes: new Uint8Array(16).fill(7) }, { k: 'x', bytes: new Uint8Array(16).fill(9) }]],
+    ]))
+    const { bytes } = await compressPdf(src)
+    const doc = await parsePdf(bytes)
+    assert.ok(get(doc.trailer, 'Info'), 'Info survives compress')
+    assert.ok(get(doc.trailer, 'ID'), 'ID survives compress')
+    const cat = deref(doc, get(doc.trailer, 'Root'))
+    const outl = deref(doc, get(cat, 'Outlines'))
+    assert.ok(outl instanceof Map, 'Outlines survives')
+    const first = get(outl, 'First')
+    const destPage = deref(doc, get(first, 'Dest')[0])
+    assert.ok(destPage instanceof Map && typeIs(destPage, 'Page'),
+      'outline dest remaps to the kept page')
   })
 })

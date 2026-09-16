@@ -6,6 +6,11 @@ import { ImgToPdf } from './tools/img2pdf.js'
 import { ExtractImgs } from './tools/extract.js'
 import { PageNums } from './tools/pagenum.js'
 import { Scrub } from './tools/scrub.js'
+import { PdfToPng } from './tools/pdf2png.js'
+import { PdfToText } from './tools/pdftext.js'
+import { Compress } from './tools/compress.js'
+import { Watermark } from './tools/watermark.js'
+import { Protect } from './tools/protect.js'
 
 const TOOLS = [
   { id: 'merge', name: 'Merge PDF', desc: 'Combine PDFs into one, in your order', icon: 'files', view: Merge },
@@ -14,6 +19,11 @@ const TOOLS = [
   { id: 'img2pdf', name: 'Images to PDF', desc: 'JPG/PNG/WebP pages into a single PDF', icon: 'image', view: ImgToPdf },
   { id: 'extract', name: 'Extract images', desc: 'Pull embedded images out — JPG/PNG in a zip', icon: 'layers', view: ExtractImgs },
   { id: 'pagenum', name: 'Page numbers', desc: 'Stamp "N / total" on every page', icon: 'hash', view: PageNums },
+  { id: 'watermark', name: 'Watermark', desc: 'Diagonal translucent text on every page', icon: 'droplet', view: Watermark },
+  { id: 'pdf2png', name: 'PDF to PNG', desc: 'Render every page to images, in a zip', icon: 'download', view: PdfToPng },
+  { id: 'pdftext', name: 'PDF to text', desc: 'Pull the text out, pages in order', icon: 'filetext', view: PdfToText },
+  { id: 'compress', name: 'Compress PDF', desc: 'Recompress streams + re-encode images', icon: 'shrink', view: Compress },
+  { id: 'protect', name: 'Protect / Unlock', desc: 'Password-protect or unlock a PDF', icon: 'lock', view: Protect },
   { id: 'scrub', name: 'Scrub metadata', desc: 'Strip author, producer, XMP and doc IDs', icon: 'eraser', view: Scrub },
 ]
 

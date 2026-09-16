@@ -1,4 +1,4 @@
-import { concat, enc, serialize } from './types.js'
+import { concat, enc, ref, serialize } from './types.js'
 
 /** A document under construction: numbered objects + allocator. */
 export function newDoc() {
@@ -14,8 +14,9 @@ export function newDoc() {
   }
 }
 
-/** Serialize a built doc to PDF bytes: header, objects, classic xref, trailer. */
-export function writeDoc(doc, rootNum) {
+/** Serialize a built doc to PDF bytes: header, objects, classic xref, trailer.
+ *  trailerExtra: Map merged into the trailer dict (/Encrypt, /ID, ...). */
+export function writeDoc(doc, rootNum, trailerExtra) {
   const parts = [enc('%PDF-1.7\n%\xe2\xe3\xcf\xd3\n')]
   const offsets = new Map()
 
@@ -32,9 +33,16 @@ export function writeDoc(doc, rootNum) {
     const off = offsets.get(n)
     xref += off === undefined ? '0000000000 65535 f \r\n' : String(off).padStart(10, '0') + ' 00000 n \r\n'
   }
+  const trailer = new Map([
+    ['Size', count],
+    ['Root', ref(rootNum, 0)],
+  ])
+  if (trailerExtra instanceof Map) for (const [k, v] of trailerExtra) trailer.set(k, v)
   parts.push(
     enc(xref),
-    enc(`trailer\n<< /Size ${count} /Root ${rootNum} 0 R >>\nstartxref\n${xrefAt}\n%%EOF\n`),
+    enc('trailer\n'),
+    ...serialize(trailer),
+    enc(`\nstartxref\n${xrefAt}\n%%EOF\n`),
   )
   return concat(parts)
 }

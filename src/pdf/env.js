@@ -15,3 +15,14 @@ async function inflateRaw(data, format) {
   const stream = new Blob([data]).stream().pipeThrough(ds)
   return new Uint8Array(await new Response(stream).arrayBuffer())
 }
+
+// Environment-neutral deflate (FlateEncode). Node → zlib; browser → CompressionStream.
+export async function deflate(data) {
+  if (typeof process !== 'undefined' && process.versions?.node) {
+    const { deflateSync } = await import('node:zlib')
+    return new Uint8Array(deflateSync(data))
+  }
+  const cs = new CompressionStream('deflate')
+  const stream = new Blob([data]).stream().pipeThrough(cs)
+  return new Uint8Array(await new Response(stream).arrayBuffer())
+}

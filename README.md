@@ -29,14 +29,22 @@ Open devtools → network tab. Zero requests carrying your documents — there i
 - `src/zip.js` — ZIP writer (STORE + CRC32) for multi-file downloads.
 - `src/ui/` + `src/tools/` — vanilla DOM views. File pickers are `<label>`-activated: the dialog opens with **zero JS involved**.
 
-## Tools (v1)
+## Tools
 
-- **Merge PDF** — combine any number of PDFs, your order
-- **Split PDF** — extract ranges (`1-3, 5, 8-10`) into one file or a zip of separate PDFs
-- **Organize pages** — drag-reorder, rotate, delete
-- **Images to PDF** — JPG/PNG/WebP/GIF/BMP → PDF (decoded by the browser's own canvas)
+- **Merge PDF** — combine any number of PDFs, your order, with rendered page thumbnails
+- **Split PDF** — visual page picker or ranges (`1-3, 5, 8-10`), one file or a zip of separate PDFs/pages
+- **Organize pages** — rendered page previews, drag-reorder, move-to-position, duplicate, rotate, delete/restore, undo (Ctrl+Z), extract selected
+- **Images to PDF** — JPG/PNG/WebP/GIF/BMP → PDF with page size / orientation / margin / fit controls
+- **Extract images** — pull embedded images, deduped by content hash, zip or individual
+- **Page numbers** — position, format (incl. custom `{n}`/`{t}`), start-at, skip-first, margin
+- **Watermark** — diagonal translucent text on every page (size, color, opacity, angle)
+- **PDF to PNG** — every page rendered to an image at 1×–3×, zipped
+- **PDF to text** — position-sorted text extraction, CID/ToUnicode-aware (Arabic, CJK, …)
+- **Compress PDF** — rebuild + re-deflate every stream, optional JPEG re-encode of embedded images
+- **Protect / Unlock** — RC4-128 Standard-handler encryption, or decrypt with the password
+- **Scrub metadata** — shows you the author/producer/XMP/doc-ID leak before wiping it
 
-Known limits (honest list): encrypted PDFs bail with a clear error, PDF→images needs a real renderer so it's out, page previews show metadata cards instead of thumbnails for the same reason.
+Page previews are drawn by a **hand-written content-stream renderer** (`collectDrawOps` walks the PDF operators — graphics state, text matrices, `/Rotate`, Form XObjects, vector paths, colors, clipping — and paints to canvas). Known limits (honest list): JBIG2/CCITT image streams aren't decoded; encryption is RC4-128 (the interoperable baseline — opens everywhere) and unlock supports Standard-handler RC4 (R2/R3) — **AES-encrypted files are rejected with a clear error rather than silently corrupted**; passwords are Latin-1 only (the byte-string format every PDF reader agrees on); page-subsetting tools (split/extract/organize/merge) rebuild the page set and don't carry over document-level extras like outlines, while whole-document tools (compress, watermark, page numbers, protect/unlock) preserve `/Outlines`, `/AcroForm`, `/Names`, `/Info`, `/ID` and friends. The parser is scan-based rather than a full-spec implementation, so exotic files may be partially understood.
 
 ## Develop
 

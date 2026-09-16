@@ -40,6 +40,11 @@ const ICONS = {
   hash: 'M9 4 7 20M17 4l-2 16M4 9h17M3 15h17',
   eraser: 'M7 19h14M9 19 3.5 13.5a2 2 0 0 1 0-2.8l8.2-8.2a2 2 0 0 1 2.8 0l6 6a2 2 0 0 1 0 2.8L13 19',
   zoom: 'M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM16.5 16.5 21 21M11 8v6M8 11h6',
+  lock: 'M6 10V7a6 6 0 0 1 12 0v3M4 10h16v10H4zM12 14v3',
+  unlock: 'M6 10V7a6 6 0 0 1 11.5-2.5M4 10h16v10H4zM12 14v3',
+  filetext: 'M8 3h8l4 4v14H8zM16 3v4h4M11 12h6M11 16h6M11 8h2',
+  shrink: 'M4 14h6v6M20 10h-6V4M14 10l6-6M10 14l-6 6',
+  droplet: 'M12 3s6 6.5 6 11a6 6 0 0 1-12 0c0-4.5 6-11 6-11z',
 }
 
 export function icon(name, cls = 'icon') {

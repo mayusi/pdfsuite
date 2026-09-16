@@ -204,7 +204,7 @@ const OBJ_RE = /(\d+)\s+(\d+)\s+obj\b/g
  * Parse a PDF by scanning for indirect objects — ignores xref tables entirely,
  * so linearized / damaged / xref-stream files all parse the same.
  */
-export async function parsePdf(bytes, warnings = []) {
+export async function parsePdf(bytes, warnings = [], allowEncrypted = false) {
   const text = dec(bytes)
   const objects = new Map()
 
@@ -266,9 +266,10 @@ export async function parsePdf(bytes, warnings = []) {
     }
   }
   if (!trailer) throw new Error('not a PDF (no trailer/catalog found)')
-  if (get(trailer, 'Encrypt')) throw new Error('encrypted PDFs are not supported')
+  if (get(trailer, 'Encrypt') && !allowEncrypted)
+    throw new Error('this PDF is password-protected — unlock it in the Protect tool first')
 
-  return { objects, trailer, warnings }
+  return { objects, trailer, warnings, encrypted: !!get(trailer, 'Encrypt') }
 }
 
 /** Resolve a value: refs are dereferenced, everything else returned as-is. */
