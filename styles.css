@@ -107,6 +107,7 @@ main h1 { font-size: 24px; margin-top: 14px; }
   position: relative; display: flex; flex-direction: column;
   border: 1px solid var(--border); border-radius: 10px; background: var(--card);
   padding: 8px; text-align: center; cursor: grab; transition: all 0.12s; user-select: none;
+  touch-action: none; -webkit-touch-callout: none;
   max-height: 220px;
 }
 .pbody { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 0; }
@@ -125,7 +126,7 @@ main h1 { font-size: 24px; margin-top: 14px; }
 .pcard:hover .pops, .pcard.deleted .pops { opacity: 1; }
 
 /* selectable cards (split) */
-.pcard.pick { cursor: pointer; }
+.pcard.pick { cursor: pointer; touch-action: pan-y; } /* picker has no drag — keep native scroll */
 .pcard.pick:hover { border-color: var(--faint); }
 .pcard.sel { border-color: var(--accent); background: rgba(52, 211, 153, 0.07); }
 .pchk {
@@ -145,7 +146,7 @@ main h1 { font-size: 24px; margin-top: 14px; }
 .tbtn:disabled { opacity: 0.35; cursor: default; }
 
 /* file list extras */
-.filelist li { cursor: grab; }
+.filelist li { cursor: grab; touch-action: none; -webkit-touch-callout: none; user-select: none; }
 .filelist li.target { background: rgba(52, 211, 153, 0.08); border-radius: 6px; }
 .fmeta { color: var(--faint); font-size: 11px; margin-left: 8px; }
 .ferr { color: var(--danger); font-size: 12px; }
@@ -184,9 +185,12 @@ main h1 { font-size: 24px; margin-top: 14px; }
 .pcanvas { flex: 1; width: 100%; min-height: 0; object-fit: contain; border-radius: 6px; background: #fff; pointer-events: none; }
 .pcanvas-sm { width: 100%; height: auto; border-radius: 4px; background: #fff; display: block; }
 
-/* drag insertion line */
-.pcard.drop-before { box-shadow: inset 3px 0 0 var(--accent); }
-.pcard.drop-after { box-shadow: inset -3px 0 0 var(--accent); }
+/* pointer drag — ghost + source slot + swap target */
+.drag-ghost { position: fixed; pointer-events: none; z-index: 1000; opacity: 0.92; transform: scale(1.04); box-shadow: 0 12px 32px rgba(0,0,0,.55); border-color: var(--accent) !important; margin: 0; }
+.drag-ghost > * { border-color: var(--accent) !important; margin: 0; }
+.pcard.drag-src { opacity: 0.35; outline: 2px dashed var(--accent); outline-offset: -2px; }
+.pcard.swap-target { outline: 2px solid var(--accent); outline-offset: -2px; transform: scale(1.03); }
+.filelist li.drag-src { opacity: 0.4; }
 
 /* zoom button on selectable cards */
 .pzoom {
@@ -237,3 +241,88 @@ footer em { color: var(--dim); }
 .chk { display: flex; gap: 8px; align-items: center; margin: 8px 0; cursor: pointer; }
 .chk input { accent-color: var(--accent); }
 .meta.ok { color: var(--accent); }
+
+/* ---------- edit pdf (annotation editor) ---------- */
+.ed { display: flex; flex-direction: column; gap: 10px; }
+
+/* tool + nav button rows — always visible, wrap on narrow screens */
+.edtools { display: flex; gap: 6px; flex-wrap: wrap; }
+.ednav { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.edt {
+  min-height: 34px; padding: 6px 12px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg); color: var(--dim); font-size: 12.5px; cursor: pointer; user-select: none;
+}
+.edt:hover { color: var(--text); border-color: var(--faint); }
+.edt.on { border-color: var(--accent); color: var(--accent); background: rgba(52, 211, 153, 0.08); }
+.edt:disabled { opacity: 0.35; cursor: default; }
+.edpgl { color: var(--dim); font-size: 12.5px; min-width: 58px; text-align: center; }
+.edsep { width: 1px; height: 20px; background: var(--border); margin: 0 4px; }
+.edacts { display: inline-flex; }
+.edacts .toolbar { margin-top: 0; }
+
+/* options row — swatches, stroke/opacity sliders, font controls */
+.edopts { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
+.edsws { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.edsw {
+  width: 30px; height: 30px; border-radius: 50%; border: 2px solid var(--border);
+  cursor: pointer; padding: 0;
+}
+.edsw.on { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(52, 211, 153, 0.3); }
+.edpick {
+  width: 34px; height: 30px; padding: 0; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg); cursor: pointer;
+}
+.edopt { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--faint); }
+.edslider { width: 110px; }
+.edrangev { min-width: 36px; color: var(--dim); font-size: 12px; }
+.edtext { display: flex; gap: 8px; align-items: center; }
+.edfont { width: auto; margin: 0; padding: 6px 8px; font-size: 13px; }
+.ednum { width: 64px; margin: 0; padding: 6px 8px; }
+
+/* stage: scrollable pan container > page (base raster + vector overlay) */
+.edwrap {
+  overflow: auto; max-height: 72vh; padding: 18px;
+  border: 1px solid var(--border); border-radius: 12px;
+  background:
+    repeating-conic-gradient(#151518 0% 25%, #101013 0% 50%) 0 0 / 22px 22px;
+}
+.edpage { position: relative; margin: 0 auto; box-shadow: 0 6px 32px rgba(0, 0, 0, 0.55); }
+.edbase { display: block; width: 100%; height: 100%; }
+.edover {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  touch-action: pan-x pan-y; cursor: crosshair;
+}
+
+/* floating delete chip for the current selection */
+.edsel {
+  position: absolute; z-index: 6; width: 34px; height: 34px; border-radius: 50%;
+  border: 1px solid var(--border); background: rgba(9, 9, 11, 0.92); color: var(--danger);
+  display: flex; align-items: center; justify-content: center; cursor: pointer; padding: 0;
+}
+.edsel:hover { border-color: var(--danger); color: var(--danger); }
+.edsel .icon-sm { width: 12px; height: 12px; }
+
+/* floating text input (.edtxtin) — positioned in page pt×zoom space */
+.edtxtin {
+  position: absolute; z-index: 5; min-width: 80px; min-height: 1.4em;
+  background: rgba(9, 9, 11, 0.88); border: 1px dashed var(--accent); border-radius: 4px;
+  color: var(--text); font-family: inherit; line-height: 1.2;
+  padding: 2px 5px; outline: none; resize: both; overflow: hidden; white-space: pre;
+}
+
+/* thumbnail strip */
+.edthumbs { display: flex; gap: 8px; overflow-x: auto; padding: 4px 2px 8px; }
+.edthumb {
+  position: relative; flex: 0 0 auto; width: 90px; min-height: 40px;
+  border: 2px solid var(--border); border-radius: 8px; background: var(--card);
+  cursor: pointer; padding: 3px; display: flex; align-items: center; justify-content: center;
+}
+.edthumb.cur { border-color: var(--accent); }
+.edthumbc { width: 100%; height: 100%; object-fit: contain; border-radius: 4px; background: #fff; pointer-events: none; }
+.edthumbn {
+  position: absolute; bottom: 3px; right: 4px; font-size: 10px; color: var(--faint);
+  background: rgba(9, 9, 11, 0.8); border-radius: 4px; padding: 0 5px;
+}
+
+/* download button contents */
+.edbtnin { display: inline-flex; align-items: center; gap: 8px; }

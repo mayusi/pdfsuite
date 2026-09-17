@@ -210,7 +210,7 @@ export function Organize() {
       DropZone({ accept: 'application/pdf', onFiles: load }),
       items.length
         ? h('p', { class: 'meta dim' },
-            `Click to select (shift = range) · drag to reorder · ⌨ Ctrl+A / Del / Ctrl+Z · ${kept} of ${items.length} kept${n ? ` · ${n} selected` : ''}`)
+            `Click to select (shift = range) · drag a card onto another to swap · ⌨ Ctrl+A / Del / Ctrl+Z · ${kept} of ${items.length} kept${n ? ` · ${n} selected` : ''}`)
         : null,
       items.length
         ? Toolbar([
@@ -249,11 +249,20 @@ export function Organize() {
             selected: sel,
             onSelect,
             onZoom,
-            onReorder: (from, to) => mutate(() => {
-              const c = [...items]
-              const [x] = c.splice(from, 1)
-              c.splice(to, 0, x)
-              items = c
+            onDrop: (from, to) => mutate(() => {
+              if (sel.size > 1 && sel.has(items[from])) {
+                // block-move the selection, dragged item lands at index `to`
+                const picked = items.filter((x) => sel.has(x))
+                const rest = items.filter((x) => !sel.has(x))
+                const at = Math.max(0, Math.min(rest.length, to - picked.indexOf(items[from])))
+                items = [...rest.slice(0, at), ...picked, ...rest.slice(at)]
+              } else {
+                const c = [...items]
+                const tmp = c[from]
+                c[from] = c[to]
+                c[to] = tmp
+                items = c
+              }
             }),
             onRotate: (i, delta) => mutate(() => {
               items = items.map((x, j) => (j === i ? { ...x, rotation: ((x.rotation + delta) % 360 + 360) % 360 } : x))

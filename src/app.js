@@ -11,8 +11,10 @@ import { PdfToText } from './tools/pdftext.js'
 import { Compress } from './tools/compress.js'
 import { Watermark } from './tools/watermark.js'
 import { Protect } from './tools/protect.js'
+import { Edit } from './tools/edit.js'
 
 const TOOLS = [
+  { id: 'edit', name: 'Edit PDF', desc: 'Draw, highlight, write and stamp — a real editor', icon: 'pencil', view: Edit },
   { id: 'merge', name: 'Merge PDF', desc: 'Combine PDFs into one, in your order', icon: 'files', view: Merge },
   { id: 'split', name: 'Split PDF', desc: 'Pull out page ranges — one file or a zip', icon: 'scissors', view: Split },
   { id: 'organize', name: 'Organize pages', desc: 'Reorder, rotate and delete pages visually', icon: 'grid', view: Organize },

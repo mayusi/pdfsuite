@@ -115,6 +115,7 @@ main h1 { font-size: 24px; margin-top: 14px; }
   position: relative; display: flex; flex-direction: column;
   border: 1px solid var(--border); border-radius: 10px; background: var(--card);
   padding: 8px; text-align: center; cursor: grab; transition: all 0.12s; user-select: none;
+  touch-action: none; -webkit-touch-callout: none;
   max-height: 220px;
 }
 .pbody { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 0; }
@@ -133,7 +134,7 @@ main h1 { font-size: 24px; margin-top: 14px; }
 .pcard:hover .pops, .pcard.deleted .pops { opacity: 1; }
 
 /* selectable cards (split) */
-.pcard.pick { cursor: pointer; }
+.pcard.pick { cursor: pointer; touch-action: pan-y; } /* picker has no drag — keep native scroll */
 .pcard.pick:hover { border-color: var(--faint); }
 .pcard.sel { border-color: var(--accent); background: rgba(52, 211, 153, 0.07); }
 .pchk {
@@ -153,7 +154,7 @@ main h1 { font-size: 24px; margin-top: 14px; }
 .tbtn:disabled { opacity: 0.35; cursor: default; }
 
 /* file list extras */
-.filelist li { cursor: grab; }
+.filelist li { cursor: grab; touch-action: none; -webkit-touch-callout: none; user-select: none; }
 .filelist li.target { background: rgba(52, 211, 153, 0.08); border-radius: 6px; }
 .fmeta { color: var(--faint); font-size: 11px; margin-left: 8px; }
 .ferr { color: var(--danger); font-size: 12px; }
@@ -192,9 +193,12 @@ main h1 { font-size: 24px; margin-top: 14px; }
 .pcanvas { flex: 1; width: 100%; min-height: 0; object-fit: contain; border-radius: 6px; background: #fff; pointer-events: none; }
 .pcanvas-sm { width: 100%; height: auto; border-radius: 4px; background: #fff; display: block; }
 
-/* drag insertion line */
-.pcard.drop-before { box-shadow: inset 3px 0 0 var(--accent); }
-.pcard.drop-after { box-shadow: inset -3px 0 0 var(--accent); }
+/* pointer drag — ghost + source slot + swap target */
+.drag-ghost { position: fixed; pointer-events: none; z-index: 1000; opacity: 0.92; transform: scale(1.04); box-shadow: 0 12px 32px rgba(0,0,0,.55); border-color: var(--accent) !important; margin: 0; }
+.drag-ghost > * { border-color: var(--accent) !important; margin: 0; }
+.pcard.drag-src { opacity: 0.35; outline: 2px dashed var(--accent); outline-offset: -2px; }
+.pcard.swap-target { outline: 2px solid var(--accent); outline-offset: -2px; transform: scale(1.03); }
+.filelist li.drag-src { opacity: 0.4; }
 
 /* zoom button on selectable cards */
 .pzoom {
@@ -245,6 +249,91 @@ footer em { color: var(--dim); }
 .chk { display: flex; gap: 8px; align-items: center; margin: 8px 0; cursor: pointer; }
 .chk input { accent-color: var(--accent); }
 .meta.ok { color: var(--accent); }
+
+/* ---------- edit pdf (annotation editor) ---------- */
+.ed { display: flex; flex-direction: column; gap: 10px; }
+
+/* tool + nav button rows — always visible, wrap on narrow screens */
+.edtools { display: flex; gap: 6px; flex-wrap: wrap; }
+.ednav { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.edt {
+  min-height: 34px; padding: 6px 12px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg); color: var(--dim); font-size: 12.5px; cursor: pointer; user-select: none;
+}
+.edt:hover { color: var(--text); border-color: var(--faint); }
+.edt.on { border-color: var(--accent); color: var(--accent); background: rgba(52, 211, 153, 0.08); }
+.edt:disabled { opacity: 0.35; cursor: default; }
+.edpgl { color: var(--dim); font-size: 12.5px; min-width: 58px; text-align: center; }
+.edsep { width: 1px; height: 20px; background: var(--border); margin: 0 4px; }
+.edacts { display: inline-flex; }
+.edacts .toolbar { margin-top: 0; }
+
+/* options row — swatches, stroke/opacity sliders, font controls */
+.edopts { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
+.edsws { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.edsw {
+  width: 30px; height: 30px; border-radius: 50%; border: 2px solid var(--border);
+  cursor: pointer; padding: 0;
+}
+.edsw.on { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(52, 211, 153, 0.3); }
+.edpick {
+  width: 34px; height: 30px; padding: 0; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg); cursor: pointer;
+}
+.edopt { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--faint); }
+.edslider { width: 110px; }
+.edrangev { min-width: 36px; color: var(--dim); font-size: 12px; }
+.edtext { display: flex; gap: 8px; align-items: center; }
+.edfont { width: auto; margin: 0; padding: 6px 8px; font-size: 13px; }
+.ednum { width: 64px; margin: 0; padding: 6px 8px; }
+
+/* stage: scrollable pan container > page (base raster + vector overlay) */
+.edwrap {
+  overflow: auto; max-height: 72vh; padding: 18px;
+  border: 1px solid var(--border); border-radius: 12px;
+  background:
+    repeating-conic-gradient(#151518 0% 25%, #101013 0% 50%) 0 0 / 22px 22px;
+}
+.edpage { position: relative; margin: 0 auto; box-shadow: 0 6px 32px rgba(0, 0, 0, 0.55); }
+.edbase { display: block; width: 100%; height: 100%; }
+.edover {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  touch-action: pan-x pan-y; cursor: crosshair;
+}
+
+/* floating delete chip for the current selection */
+.edsel {
+  position: absolute; z-index: 6; width: 34px; height: 34px; border-radius: 50%;
+  border: 1px solid var(--border); background: rgba(9, 9, 11, 0.92); color: var(--danger);
+  display: flex; align-items: center; justify-content: center; cursor: pointer; padding: 0;
+}
+.edsel:hover { border-color: var(--danger); color: var(--danger); }
+.edsel .icon-sm { width: 12px; height: 12px; }
+
+/* floating text input (.edtxtin) — positioned in page pt×zoom space */
+.edtxtin {
+  position: absolute; z-index: 5; min-width: 80px; min-height: 1.4em;
+  background: rgba(9, 9, 11, 0.88); border: 1px dashed var(--accent); border-radius: 4px;
+  color: var(--text); font-family: inherit; line-height: 1.2;
+  padding: 2px 5px; outline: none; resize: both; overflow: hidden; white-space: pre;
+}
+
+/* thumbnail strip */
+.edthumbs { display: flex; gap: 8px; overflow-x: auto; padding: 4px 2px 8px; }
+.edthumb {
+  position: relative; flex: 0 0 auto; width: 90px; min-height: 40px;
+  border: 2px solid var(--border); border-radius: 8px; background: var(--card);
+  cursor: pointer; padding: 3px; display: flex; align-items: center; justify-content: center;
+}
+.edthumb.cur { border-color: var(--accent); }
+.edthumbc { width: 100%; height: 100%; object-fit: contain; border-radius: 4px; background: #fff; pointer-events: none; }
+.edthumbn {
+  position: absolute; bottom: 3px; right: 4px; font-size: 10px; color: var(--faint);
+  background: rgba(9, 9, 11, 0.8); border-radius: 4px; padding: 0 5px;
+}
+
+/* download button contents */
+.edbtnin { display: inline-flex; align-items: center; gap: 8px; }
 </style>
     <title>PDFSuite — free PDF tools, no uploads, zero deps</title>
   </head>
@@ -1365,22 +1454,28 @@ async function stampPages(bytes, stampFor) {
     const dw = rot % 180 === 0 ? w : hh
     const dh = rot % 180 === 0 ? hh : w
 
-    const stamp = stampFor({ leaf, i, total: leaves.length, mb, rot, w, hh, dw, dh })
+    const stamp = stampFor({ leaf, i, total: leaves.length, mb, rot, w, hh, dw, dh, dst })
     if (stamp) {
       const csNum = dst.alloc()
       dst.set(csNum, stream(new Map(), new TextEncoder().encode(stamp.content)))
-      const contents = pageDict.get('Contents')
+      let contents = pageDict.get('Contents')
+      if (isRef(contents)) { // qpdf-style: Contents is a ref TO an array of stream refs
+        const c = dst.objects.get(contents.n)
+        if (Array.isArray(c)) contents = c
+      }
       const arr = Array.isArray(contents) ? contents.slice() : contents !== undefined ? [contents] : []
       arr.push(ref(csNum, 0))
       pageDict.set('Contents', arr.length === 1 ? arr[0] : arr)
 
       let res = pageDict.get('Resources')
       if (isRef(res)) res = dst.objects.get(res.n)
-      if (!(res instanceof Map)) res = new Map()
+      // clone before mutating: an inherited/shared Resources dict is one copied
+      // Map reachable from every page — in-place adds would leak across pages
+      res = res instanceof Map ? new Map(res) : new Map()
       for (const [section, entries] of Object.entries(stamp.res ?? {})) {
         let sec = res.get(section)
         if (isRef(sec)) sec = dst.objects.get(sec.n)
-        if (!(sec instanceof Map)) sec = new Map()
+        sec = sec instanceof Map ? new Map(sec) : new Map()
         for (const [nm, val] of Object.entries(entries)) if (!sec.has(nm)) sec.set(nm, val)
         res.set(section, sec)
       }
@@ -1448,6 +1543,206 @@ async function watermarkPdf(
         ExtGState: { GSwm: new Map([['ca', opacity], ['CA', opacity]]) },
       },
     }
+  })
+}
+
+// ---------- edit annotations ----------
+
+/** Unicode → CP1252 byte for the 0x80–0x9F range (differs from latin1). */
+const ANN_CP1252 = new Map([
+  [0x20ac, 0x80], [0x201a, 0x82], [0x0192, 0x83], [0x201e, 0x84], [0x2026, 0x85],
+  [0x2020, 0x86], [0x2021, 0x87], [0x02c6, 0x88], [0x2030, 0x89], [0x0160, 0x8a],
+  [0x2039, 0x8b], [0x0152, 0x8c], [0x017d, 0x8e], [0x2018, 0x91], [0x2019, 0x92],
+  [0x201c, 0x93], [0x201d, 0x94], [0x2022, 0x95], [0x2013, 0x96], [0x2014, 0x97],
+  [0x02dc, 0x98], [0x2122, 0x99], [0x0161, 0x9a], [0x203a, 0x9b], [0x0153, 0x9c],
+  [0x017e, 0x9e], [0x0178, 0x9f],
+])
+
+/** WinAnsi literal string: CP1252 bytes, high/control bytes as \ooo, else '?'. */
+const annStr = (s) => {
+  let out = '('
+  for (const ch of s) {
+    const cp = ch.codePointAt(0)
+    const b = cp < 0x80 ? cp : cp >= 0xa0 && cp < 0x100 ? cp : ANN_CP1252.get(cp) ?? 0x3f
+    if (b === 0x28 || b === 0x29 || b === 0x5c) out += '\\' + String.fromCharCode(b)
+    else if (b >= 0x20 && b < 0x7f) out += String.fromCharCode(b)
+    else out += '\\' + b.toString(8).padStart(3, '0')
+  }
+  return out + ')'
+}
+
+const annNum = (v) => +v.toFixed(2)
+
+/** '#rrggbb' → 'r g b' (0–1 floats, 3 decimals) or null. */
+const annColor = (hex) => {
+  const m = /^#([0-9a-f]{6})$/i.exec(typeof hex === 'string' ? hex : '')
+  if (!m) return null
+  const n = parseInt(m[1], 16)
+  return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255]
+    .map((c) => c.toFixed(3)).join(' ')
+}
+
+const ANN_FONTS = {
+  helv: ['ANN_F1', 'Helvetica'],
+  helvb: ['ANN_F2', 'Helvetica-Bold'],
+  times: ['ANN_F3', 'Times-Roman'],
+  courier: ['ANN_F4', 'Courier'],
+}
+const ANN_KAPPA = 0.5523
+
+const annFontDict = (base) => new Map([
+  ['Type', name('Font')], ['Subtype', name('Type1')], ['BaseFont', name(base)],
+])
+
+/**
+ * Bake UI annotations into pages as real PDF operators.
+ * pagesAnnots[p] (0-based) = [{t, ...}] in DISPLAY-space pt (top-left origin,
+ * y down, dims dw×dh); falsy/empty entries leave the page untouched.
+ * Shapes: stroke {pts,color,width}, vstroke {pts:[x,y,w]}, highlight {pts,
+ * color,width}, line {x1,y1,x2,y2,arrow?}, rect/ellipse {x,y,w,h,stroke,fill,
+ * lw}, text {x,y,text,size,font} (x,y = TOP of first line; baseline = y+size,
+ * leading 1.2×size),
+ * image {x,y,w,h,jpeg}. Appends one content stream per touched page and merges
+ * ANN_* resources (fonts, ExtGState, XObjects) into page Resources.
+ */
+async function annotatePdf(bytes, pagesAnnots) {
+  return stampPages(bytes, ({ i, mb, rot, w, hh, dh, dst }) => {
+    const anns = pagesAnnots?.[i]
+    if (!Array.isArray(anns) || !anns.length) return null
+    // display→user wrap: after this cm all coords are display space (y down)
+    const dispLin = rot === 90 ? [0, 1, 1, 0]
+      : rot === 180 ? [-1, 0, 0, 1]
+      : rot === 270 ? [0, -1, -1, 0]
+      : [1, 0, 0, -1]
+    const [xu0, yu0] = stampPos(rot, 0, dh, w, hh)
+    const wrap = `${dispLin.join(' ')} ${annNum(mb[0] + xu0)} ${annNum(mb[1] + yu0)} cm`
+    const res = {}
+    const ops = []
+    let gsN = 0, imN = 0
+    const gsFor = (alpha, multiply) => {
+      const d = new Map([['ca', alpha], ['CA', alpha]])
+      if (multiply) d.set('BM', name('Multiply'))
+      const nm = `ANN_GS${++gsN}`
+      ;(res.ExtGState ??= {})[nm] = d
+      return `/${nm} gs`
+    }
+    const pt2 = (p) => Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1])
+    const num = (v) => Number.isFinite(v) ? annNum(v) : '0'
+    for (const a of anns) {
+      if (!a || typeof a !== 'object') continue
+      const alpha = typeof a.alpha === 'number' ? Math.min(1, Math.max(0, a.alpha)) : null
+      const needsGs = a.t === 'highlight' || (alpha !== null && alpha < 1)
+      const gs = needsGs ? gsFor(alpha ?? 0.35, a.t === 'highlight') : ''
+      const color = annColor(a.color)
+      const parts = []
+      switch (a.t) {
+        case 'stroke':
+        case 'highlight': {
+          if (!color || !Array.isArray(a.pts) || a.pts.length < 1 || !a.pts.every(pt2)) break
+          const w0 = a.t === 'highlight' ? (a.width ?? 12) : (a.width ?? 2)
+          const path = a.pts.length === 1
+            ? `${num(a.pts[0][0])} ${num(a.pts[0][1])} m ${num(a.pts[0][0] + 0.01)} ${num(a.pts[0][1])} l` // tap-dot
+            : a.pts.map((p, k) => `${num(p[0])} ${num(p[1])} ${k ? 'l' : 'm'}`).join(' ')
+          parts.push(`${color} RG ${num(w0)} w 1 J 1 j ${path} S`)
+          break
+        }
+        case 'vstroke': {
+          if (!color || !Array.isArray(a.pts) || a.pts.length < 1) break
+          const segs = []
+          for (let k = 0; k + 1 < a.pts.length; k++) {
+            const [p, q] = [a.pts[k], a.pts[k + 1]]
+            if (!pt2(p) || !pt2(q)) continue
+            const sw = Math.min(60, Math.max(0.3, typeof p[2] === 'number' ? p[2] : 1))
+            segs.push(`${num(sw)} w ${num(p[0])} ${num(p[1])} m ${num(q[0])} ${num(q[1])} l S`)
+          }
+          if (!segs.length && a.pts.length === 1 && pt2(a.pts[0])) { // tap-dot
+            const p = a.pts[0]
+            const sw = Math.min(60, Math.max(0.3, typeof p[2] === 'number' ? p[2] : 1))
+            segs.push(`${num(sw)} w ${num(p[0])} ${num(p[1])} m ${num(p[0] + 0.01)} ${num(p[1])} l S`)
+          }
+          if (!segs.length) break
+          parts.push(`${color} RG 1 J 1 j ${segs.join(' ')}`)
+          break
+        }
+        case 'line': {
+          if (!color || ![a.x1, a.y1, a.x2, a.y2].every(Number.isFinite)) break
+          const lw = typeof a.width === 'number' && a.width > 0 ? a.width : 2
+          parts.push(`${color} RG ${num(lw)} w ${num(a.x1)} ${num(a.y1)} m ${num(a.x2)} ${num(a.y2)} l S`)
+          if (a.arrow) {
+            const ang = Math.atan2(a.y2 - a.y1, a.x2 - a.x1)
+            const L = Math.min(60, 3 * lw)
+            const [bx, by] = [a.x2 - L * Math.cos(ang), a.y2 - L * Math.sin(ang)]
+            const [px, py] = [-Math.sin(ang) * L * 0.45, Math.cos(ang) * L * 0.45]
+            parts.push(
+              `${color} rg ${num(a.x2)} ${num(a.y2)} m ${num(bx + px)} ${num(by + py)} l ` +
+              `${num(bx - px)} ${num(by - py)} l h f`,
+            )
+          }
+          break
+        }
+        case 'rect':
+        case 'ellipse': {
+          if (![a.x, a.y, a.w, a.h].every(Number.isFinite)) break
+          const fill = annColor(a.fill), strokeC = annColor(a.stroke)
+          if (!fill && !strokeC) break
+          const lw = typeof a.lw === 'number' && a.lw > 0 ? a.lw : 1
+          let path
+          if (a.t === 'rect') {
+            path = `${num(a.x)} ${num(a.y)} ${num(a.w)} ${num(a.h)} re`
+          } else {
+            const [cx, cy, rx, ry, k] = [a.x + a.w / 2, a.y + a.h / 2, a.w / 2, a.h / 2, ANN_KAPPA]
+            path =
+              `${num(cx + rx)} ${num(cy)} m ` +
+              `${num(cx + rx)} ${num(cy - k * ry)} ${num(cx + k * rx)} ${num(cy - ry)} ${num(cx)} ${num(cy - ry)} c ` +
+              `${num(cx - k * rx)} ${num(cy - ry)} ${num(cx - rx)} ${num(cy - k * ry)} ${num(cx - rx)} ${num(cy)} c ` +
+              `${num(cx - rx)} ${num(cy + k * ry)} ${num(cx - k * rx)} ${num(cy + ry)} ${num(cx)} ${num(cy + ry)} c ` +
+              `${num(cx + k * rx)} ${num(cy + ry)} ${num(cx + rx)} ${num(cy + k * ry)} ${num(cx + rx)} ${num(cy)} c h`
+          }
+          const paint = fill && strokeC ? 'B' : fill ? 'f' : 'S'
+          parts.push(
+            `${fill ? `${fill} rg ` : ''}${strokeC ? `${strokeC} RG ` : ''}${num(lw)} w ${path} ${paint}`,
+          )
+          break
+        }
+        case 'text': {
+          const size = typeof a.size === 'number' && a.size > 0 ? a.size : null
+          const [fname, base] = ANN_FONTS[a.font] ?? ANN_FONTS.helv
+          if (!color || !size || typeof a.text !== 'string' || !a.text.length ||
+              ![a.x, a.y].every(Number.isFinite)) break
+          ;(res.Font ??= {})[fname] = annFontDict(base)
+          const lines = a.text.split('\n')
+          lines.forEach((line, li) => {
+            const yTd = a.y + size + li * size * 1.2 // baseline = top + one em
+            const [xu, yu, m] = stampPos(rot, a.x, dh - yTd, w, hh)
+            ops.push(
+              `q ${gs} ${m.join(' ')} ${annNum(mb[0] + xu)} ${annNum(mb[1] + yu)} cm ` +
+              `${color} rg BT /${fname} ${num(size)} Tf 0 0 Td ${annStr(line)} Tj ET Q`,
+            )
+          })
+          break
+        }
+        case 'image': {
+          if (!(a.jpeg instanceof Uint8Array) || ![a.x, a.y, a.w, a.h].every(Number.isFinite)) break
+          let info
+          try { info = jpegInfo(a.jpeg) } catch { break } // non-JPEG → skip
+          const imNum = dst.alloc()
+          dst.set(imNum, stream(new Map([
+            ['Type', name('XObject')], ['Subtype', name('Image')],
+            ['Width', info.width], ['Height', info.height],
+            ['ColorSpace', name(info.colorSpace)], ['BitsPerComponent', 8],
+            ['Filter', name('DCTDecode')],
+          ]), a.jpeg))
+          const nm = `ANN_Im${++imN}`
+          ;(res.XObject ??= {})[nm] = ref(imNum, 0)
+          parts.push(`${num(a.w)} 0 0 ${num(-a.h)} ${num(a.x)} ${num(a.y + a.h)} cm /${nm} Do`)
+          break
+        }
+      }
+      if (parts.length) ops.push(`q ${wrap} ${[gs, ...parts].filter(Boolean).join(' ')} Q`)
+    }
+    // leading \n keeps our first op from merging with the previous stream's
+    // last token (Contents arrays concatenate without a separator)
+    return ops.length ? { content: '\n' + ops.join('\n'), res } : null
   })
 }
 
@@ -2832,7 +3127,8 @@ const ICONS = {
   shield: 'M12 3l8 3v6c0 4.5-3.2 7.7-8 9-4.8-1.3-8-4.5-8-9V6zM9 12l2 2 4-4',
   layers: 'M12 3 2 9l10 6 10-6zM4 12.5 12 17l8-4.5M4 16.5 12 21l8-4.5',
   hash: 'M9 4 7 20M17 4l-2 16M4 9h17M3 15h17',
-  eraser: 'M7 19h14M9 19 3.5 13.5a2 2 0 0 1 0-2.8l8.2-8.2a2 2 0 0 1 2.8 0l6 6a2 2 0 0 1 0 2.8L13 19',
+  eraser: 'M7 19h14M9 19 3.5 13.5a2 2 0 0 1 0-2.8l8.2-8.2a2 2 0 0 1 0 2.8L13 19',
+  pencil: 'M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z',
   zoom: 'M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM16.5 16.5 21 21M11 8v6M8 11h6',
   lock: 'M6 10V7a6 6 0 0 1 12 0v3M4 10h16v10H4zM12 14v3',
   unlock: 'M6 10V7a6 6 0 0 1 11.5-2.5M4 10h16v10H4zM12 14v3',
@@ -2938,37 +3234,233 @@ function DropZone({ accept, multiple = false, onFiles, label }) {
 }
 
 /**
+ * Shared pointer-drag reorder — grab an item, a ghost follows the pointer, the
+ * sibling under it highlights, drop fires onDrop(from, to). Mouse/pen grabs after
+ * 5px; touch grabs after a 180ms hold — moving earlier means the user is scrolling,
+ * so the gesture drives window.scrollBy by hand (touch-action:none killed native).
+ */
+function attachPtrDrag(container, itemSel, { onDrop, targetCls }) {
+  let st = null // live gesture: {pid, touch, x0, y0, x, y, lastY, el, mode, ...}
+  let eatClick = false // a completed drag/scroll swallows the trailing click
+
+  const rectsOf = () => st.nodes.map((n) => ({ n, r: n.getBoundingClientRect() }))
+
+  const mark = (n) => {
+    if (n === st.target) return
+    st.target?.classList.remove(targetCls)
+    st.target = n
+    n?.classList.add(targetCls)
+  }
+
+  const hitTest = () => {
+    if (!st.el.isConnected) return stop(false)
+    const hit = st.rects.find(
+      ({ n, r }) => n !== st.el && st.x >= r.left && st.x <= r.right && st.y >= r.top && st.y <= r.bottom,
+    )
+    mark(hit?.n ?? null)
+  }
+
+  const moveGhost = () => {
+    st.ghost.style.transform = `translate(${st.x - st.offX}px, ${st.y - st.offY}px) scale(1.04)`
+  }
+
+  // edge auto-scroll: ~8px/frame scaled by proximity to viewport top/bottom
+  const scrollTick = () => {
+    if (!st) return
+    st.raf = 0
+    if (st.mode !== 'drag' || !st.vy) return
+    window.scrollBy(0, st.vy)
+    st.rects = rectsOf()
+    hitTest()
+    if (st) st.raf = requestAnimationFrame(scrollTick)
+  }
+
+  const onScroll = () => {
+    if (st?.mode !== 'drag') return
+    st.rects = rectsOf()
+    hitTest()
+  }
+
+  const onEsc = (e) => {
+    if (e.key === 'Escape' && st) stop(false)
+  }
+
+  // safety net for gestures orphaned mid-flight (container re-rendered, capture
+  // stolen): a pointerup anywhere in the doc ends a drag whose card is gone
+  const onDocUp = (e) => {
+    if (st && e.pointerId === st.pid && st.mode === 'drag' && !st.el.isConnected) stop(false)
+  }
+
+  const activate = () => {
+    st.mode = 'drag'
+    st.nodes = [...container.querySelectorAll(itemSel)]
+    st.rects = rectsOf()
+    const r = st.el.getBoundingClientRect()
+    st.offX = st.x0 - r.left
+    st.offY = st.y0 - r.top
+    const clone = st.el.cloneNode(true)
+    const srcCv = st.el.querySelectorAll('canvas')
+    clone.querySelectorAll('canvas').forEach((c, i) => {
+      const s = srcCv[i]
+      if (!s) return
+      c.width = s.width
+      c.height = s.height
+      c.getContext('2d').drawImage(s, 0, 0) // cloneNode doesn't carry the bitmap
+    })
+    clone.style.width = '100%'
+    // same-class empty shell so class-scoped styles (.filelist li) still hit the clone
+    const ghost = container.cloneNode(false)
+    ghost.classList.add('drag-ghost')
+    ghost.removeAttribute('id')
+    Object.assign(ghost.style, {
+      display: 'block',
+      left: '0',
+      top: '0',
+      width: `${r.width}px`,
+      transformOrigin: `${st.offX}px ${st.offY}px`,
+    })
+    ghost.append(clone)
+    document.body.append(ghost)
+    st.ghost = ghost
+    st.el.classList.add('drag-src')
+    window.addEventListener('scroll', onScroll, true)
+    document.addEventListener('keydown', onEsc)
+    document.addEventListener('pointerup', onDocUp, true)
+    moveGhost()
+    hitTest()
+  }
+
+  const stop = (snap) => {
+    const { el, ghost, mode, timer, raf, target } = st
+    if (mode !== 'pre') eatClick = true
+    clearTimeout(timer)
+    if (raf) cancelAnimationFrame(raf)
+    window.removeEventListener('scroll', onScroll, true)
+    document.removeEventListener('keydown', onEsc)
+    document.removeEventListener('pointerup', onDocUp, true)
+    target?.classList.remove(targetCls)
+    st = null
+    if (ghost && snap && el.isConnected) {
+      const r = el.getBoundingClientRect()
+      ghost.style.transition = 'transform .12s ease'
+      ghost.style.transform = `translate(${r.left}px, ${r.top}px) scale(1)`
+      setTimeout(() => {
+        ghost.remove()
+        el.classList.remove('drag-src')
+      }, 140)
+    } else {
+      ghost?.remove()
+      el.classList.remove('drag-src')
+    }
+  }
+
+  container.addEventListener('pointerdown', (e) => {
+    if (st) {
+      if (st.el.isConnected) return // one gesture at a time
+      stop(false) // container was re-rendered mid-gesture — drop the stale state
+    }
+    eatClick = false
+    if (e.button) return
+    if (e.target.closest('button, .pops')) return
+    const el = e.target.closest(itemSel)
+    if (!el || el.parentElement !== container) return
+    st = {
+      pid: e.pointerId, touch: e.pointerType === 'touch',
+      x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY, lastY: e.clientY,
+      el, mode: 'pre', vy: 0, raf: 0, target: null, ghost: null, timer: 0,
+    }
+    el.setPointerCapture(e.pointerId)
+    if (st.touch) st.timer = setTimeout(() => st?.mode === 'pre' && activate(), 180)
+  })
+
+  container.addEventListener('pointermove', (e) => {
+    if (!st || e.pointerId !== st.pid) return
+    st.x = e.clientX
+    st.y = e.clientY
+    const dx = e.clientX - st.x0
+    const dy = e.clientY - st.y0
+    if (st.mode === 'pre') {
+      if (st.touch) {
+        if (dx * dx + dy * dy > 100) {
+          clearTimeout(st.timer)
+          st.mode = 'scroll' // moved before the hold fired — hand-scroll instead
+          window.scrollBy(0, st.lastY - e.clientY)
+        }
+      } else if (dx * dx + dy * dy > 25) activate()
+    } else if (st.mode === 'scroll') {
+      window.scrollBy(0, st.lastY - e.clientY)
+    } else {
+      moveGhost()
+      hitTest()
+      if (!st) return
+      const z = 48
+      st.vy = st.y < z ? -8 * (1 - st.y / z) : innerHeight - st.y < z ? 8 * (1 - (innerHeight - st.y) / z) : 0
+      if (st.vy && !st.raf) st.raf = requestAnimationFrame(scrollTick)
+    }
+    st.lastY = e.clientY
+  })
+
+  container.addEventListener('pointerup', (e) => {
+    if (!st || e.pointerId !== st.pid) return
+    if (st.mode !== 'drag') {
+      if (st.mode === 'scroll') eatClick = true
+      clearTimeout(st.timer)
+      st = null
+      return
+    }
+    const from = st.nodes.indexOf(st.el)
+    const to = st.target ? st.nodes.indexOf(st.target) : -1
+    stop(to < 0)
+    if (to >= 0 && to !== from) onDrop?.(from, to)
+  })
+
+  container.addEventListener('pointercancel', (e) => {
+    if (!st || e.pointerId !== st.pid) return
+    if (st.mode === 'drag') stop(true)
+    else {
+      clearTimeout(st.timer)
+      st = null
+    }
+  })
+
+  // capture phase beats the card's own onclick — eat the click a drag leaves behind
+  container.addEventListener('click', (e) => {
+    if (!eatClick) return
+    eatClick = false
+    e.preventDefault()
+    e.stopPropagation()
+  }, true)
+
+  // kill stray native drags (images are draggable by default)
+  container.addEventListener('dragstart', (e) => e.preventDefault())
+
+  // Android fires contextmenu ~500ms into a held touch → pointercancel would
+  // snap a live drag back. Only suppressed mid-gesture; normal right-click stays.
+  container.addEventListener('contextmenu', (e) => { if (st) e.preventDefault() })
+
+  // if the browser drops capture mid-gesture, release the state — otherwise st
+  // wedges and every later pointerdown early-returns (dead drag until re-render)
+  container.addEventListener('lostpointercapture', (e) => {
+    if (!st || e.pointerId !== st.pid) return
+    if (st.mode === 'drag') stop(false)
+    else {
+      if (st.mode === 'scroll') eatClick = true
+      clearTimeout(st.timer)
+      st = null
+    }
+  })
+}
+
+/**
  * Ordered file list — drag-to-reorder + move-up/down + remove.
  * Each item may carry .meta (extra info line, e.g. page count) and .err.
  */
 function FileList({ files, onMove, onRemove }) {
-  let dragIdx = null
   const list = h('ul', { class: 'filelist' })
   files.forEach((f, i) => {
     const li = h(
       'li',
-      {
-        draggable: 'true',
-        ondragstart: (e) => {
-          dragIdx = i
-          e.dataTransfer.effectAllowed = 'move'
-          e.dataTransfer.setData('text/plain', '') // required for drag to fire
-        },
-        ondragend: () => {
-          dragIdx = null
-          list.querySelectorAll('li').forEach((x) => x.classList.remove('target'))
-        },
-        ondragover: (e) => {
-          e.preventDefault()
-          li.classList.add('target')
-        },
-        ondragleave: () => li.classList.remove('target'),
-        ondrop: (e) => {
-          e.preventDefault()
-          li.classList.remove('target')
-          if (dragIdx !== null && dragIdx !== i) onMove(dragIdx, i)
-        },
-      },
+      {},
       f.thumbNode
         ? f.thumbNode
         : f.thumb
@@ -2984,6 +3476,7 @@ function FileList({ files, onMove, onRemove }) {
     if (f.detail) li.append(h('div', { class: 'fdetail' }, f.detail))
     list.append(li)
   })
+  attachPtrDrag(list, 'li', { targetCls: 'target', onDrop: onMove })
   return list
 }
 
@@ -3009,15 +3502,13 @@ function ErrorText(msg) {
 }
 
 /**
- * Page-card grid for Organize — drag-reorder, rotate ±90°, delete/restore,
- * click/shift select, insertion-line drop indicator, zoom on demand.
+ * Page-card grid for Organize — grab & swap drag-reorder, rotate ±90°,
+ * delete/restore, click/shift select, zoom on demand.
  * items: [{page, w, h, rotation, deleted, canvas?, imgUrl?, text?}]
+ * onDrop(dragIdx, targetIdx) — the card the pointer was released over.
  */
-function PageGrid({ items, onReorder, onRotate, onToggleDelete, selected, onSelect, onZoom }) {
-  let dragIdx = null
+function PageGrid({ items, onDrop, onRotate, onToggleDelete, selected, onSelect, onZoom }) {
   const grid = h('div', { class: 'pgrid' })
-
-  const clearMarks = () => grid.querySelectorAll('.pcard').forEach((c) => c.classList.remove('target', 'drop-before', 'drop-after'))
 
   items.forEach((it, i) => {
     const card = h(
@@ -3025,35 +3516,7 @@ function PageGrid({ items, onReorder, onRotate, onToggleDelete, selected, onSele
       {
         class: 'pcard' + (it.deleted ? ' deleted' : '') + (selected?.has(it) ? ' sel' : ''),
         style: { aspectRatio: it.w && it.h ? `${it.w} / ${it.h}` : '3 / 4' },
-        draggable: 'true',
         onclick: onSelect ? (e) => onSelect(i, e.shiftKey) : undefined,
-        ondragstart: (e) => {
-          dragIdx = i
-          e.dataTransfer.effectAllowed = 'move'
-          e.dataTransfer.setData('text/plain', '') // required for drag to fire
-        },
-        ondragend: () => {
-          dragIdx = null
-          clearMarks()
-        },
-        ondragover: (e) => {
-          e.preventDefault()
-          clearMarks()
-          const r = card.getBoundingClientRect()
-          const after = e.clientX > r.left + r.width / 2
-          card.classList.add(after ? 'drop-after' : 'drop-before')
-        },
-        ondragleave: () => card.classList.remove('drop-before', 'drop-after'),
-        ondrop: (e) => {
-          e.preventDefault()
-          const r = card.getBoundingClientRect()
-          const after = e.clientX > r.left + r.width / 2
-          clearMarks()
-          if (dragIdx === null) return
-          let to = after ? i + 1 : i
-          if (dragIdx < to) to--
-          if (to !== dragIdx) onReorder(dragIdx, to)
-        },
       },
       h('div', { class: 'pbody' },
         it.canvas ?? (it.imgUrl
@@ -3077,6 +3540,7 @@ function PageGrid({ items, onReorder, onRotate, onToggleDelete, selected, onSele
     )
     grid.append(card)
   })
+  attachPtrDrag(grid, '.pcard', { targetCls: 'swap-target', onDrop })
   return grid
 }
 
@@ -3129,33 +3593,11 @@ function SelectGrid({ items, selected, onToggle, onZoom }) {
  * files: [{file, url}] — caller owns URL.createObjectURL / revoke.
  */
 function ThumbList({ files, onMove, onRemove }) {
-  let dragIdx = null
   const list = h('ul', { class: 'filelist thumbs' })
   files.forEach((f, i) => {
     const li = h(
       'li',
-      {
-        draggable: 'true',
-        ondragstart: (e) => {
-          dragIdx = i
-          e.dataTransfer.effectAllowed = 'move'
-          e.dataTransfer.setData('text/plain', '')
-        },
-        ondragend: () => {
-          dragIdx = null
-          list.querySelectorAll('li').forEach((x) => x.classList.remove('target'))
-        },
-        ondragover: (e) => {
-          e.preventDefault()
-          li.classList.add('target')
-        },
-        ondragleave: () => li.classList.remove('target'),
-        ondrop: (e) => {
-          e.preventDefault()
-          li.classList.remove('target')
-          if (dragIdx !== null && dragIdx !== i) onMove(dragIdx, i)
-        },
-      },
+      {},
       h('img', { class: 'thumb', src: f.url, alt: '' }),
       h('span', { class: 'fname' }, f.file.name),
       h('span', { class: 'fsize' }, f.dims ?? fmtBytes(f.file.size)),
@@ -3165,6 +3607,7 @@ function ThumbList({ files, onMove, onRemove }) {
     )
     list.append(li)
   })
+  attachPtrDrag(list, 'li', { targetCls: 'target', onDrop: onMove })
   return list
 }
 
@@ -3817,7 +4260,7 @@ function Organize() {
       DropZone({ accept: 'application/pdf', onFiles: load }),
       items.length
         ? h('p', { class: 'meta dim' },
-            `Click to select (shift = range) · drag to reorder · ⌨ Ctrl+A / Del / Ctrl+Z · ${kept} of ${items.length} kept${n ? ` · ${n} selected` : ''}`)
+            `Click to select (shift = range) · drag a card onto another to swap · ⌨ Ctrl+A / Del / Ctrl+Z · ${kept} of ${items.length} kept${n ? ` · ${n} selected` : ''}`)
         : null,
       items.length
         ? Toolbar([
@@ -3856,11 +4299,20 @@ function Organize() {
             selected: sel,
             onSelect,
             onZoom,
-            onReorder: (from, to) => mutate(() => {
-              const c = [...items]
-              const [x] = c.splice(from, 1)
-              c.splice(to, 0, x)
-              items = c
+            onDrop: (from, to) => mutate(() => {
+              if (sel.size > 1 && sel.has(items[from])) {
+                // block-move the selection, dragged item lands at index `to`
+                const picked = items.filter((x) => sel.has(x))
+                const rest = items.filter((x) => !sel.has(x))
+                const at = Math.max(0, Math.min(rest.length, to - picked.indexOf(items[from])))
+                items = [...rest.slice(0, at), ...picked, ...rest.slice(at)]
+              } else {
+                const c = [...items]
+                const tmp = c[from]
+                c[from] = c[to]
+                c[to] = tmp
+                items = c
+              }
             }),
             onRotate: (i, delta) => mutate(() => {
               items = items.map((x, j) => (j === i ? { ...x, rotation: ((x.rotation + delta) % 360 + 360) % 360 } : x))
@@ -3881,6 +4333,948 @@ function Organize() {
     }
   }
   render()
+  return root
+}
+
+// ---- src/tools/edit.js ----
+
+/**
+ * Edit PDF — annotation layer over rendered pages: pen (pressure), highlighter,
+ * text, line/arrow, rect/ellipse, whiteout, images, select/move/resize, eraser.
+ * Annotations live in DISPLAY space (top-left origin, pt units, post-/Rotate
+ * dims) — exactly the space annotatePdf() consumes on export.
+ */
+function Edit() {
+  // ---------- state ----------
+  let file = null
+  let bytes = null
+  let doc = null
+  let leaves = []
+  let dims = []
+  let annots = [] // annots[i] = annotation objects for page i
+  let page = 0
+  let zoom = 1
+  let tool = 'select'
+  let color = '#e03131'
+  let penWidth = 4
+  let alpha = 1
+  let font = 'helv'
+  let fontSize = 16
+  let sel = null // selected annotation (object identity inside annots[page])
+  let undoStack = []
+  let redoStack = []
+  let busy = false
+  let error = ''
+  let loadGen = 0
+  let baseGen = 0
+  const imgCache = new Map() // shared page-render decode cache
+  const bmpCache = new WeakMap() // image annot → ImageBitmap | Promise
+  const root = h('div', { class: 'tool' })
+
+  // dom refs — built once per loaded doc, updated in place (canvas state is precious)
+  let editorEl = null
+  let stage, pageEl, base, over, octx, delChip
+  let thumbsEl, thumbObs
+  let metaEl, pageLbl, zoomLbl, prevBtn, nextBtn, dlBtn
+  let toolBtns, fontWrap, widthSlider, widthLbl, alphaSlider, alphaLbl, colorPick
+  let swatchEls = []
+  let actionSlot
+  let txtIn = null // {ta, x, y} floating text editor
+
+  // gesture state
+  const pointers = new Map() // pointerId → {x,y} client px — powers pinch zoom
+  let pinch = null // {d} last finger-pair distance
+  let draft = null // in-progress stroke/shape (not yet committed)
+  let drag = null // {kind:'shape'|'move'|'resize', corner, sx, sy, o, pushed}
+  let captureId = null // pointerId owning the active gesture
+  let tap = null // {id,x,y} pending text/eraser tap
+  let pendingDeselect = null // pointerId of an empty-space press awaiting its up
+
+  const ED_TOOLS = [
+    ['select', 'Select'], ['pen', 'Pen'], ['hilite', 'Highlight'], ['text', 'Text'],
+    ['line', 'Line'], ['arrow', 'Arrow'], ['rect', 'Rect'], ['ellipse', 'Ellipse'],
+    ['whiteout', 'Whiteout'], ['image', 'Image'], ['eraser', 'Eraser'],
+  ]
+  const ED_COLORS = ['#111111', '#e03131', '#1971c2', '#2f9e44', '#f08c00', '#862e9c', '#ffffff']
+  const ED_FONTS = [['helv', 'Helvetica'], ['helvb', 'Helvetica Bold'], ['times', 'Times'], ['courier', 'Courier']]
+  const ED_DRAW = new Set(['pen', 'hilite', 'line', 'arrow', 'rect', 'ellipse', 'whiteout'])
+  const ED_FAM = {
+    helv: 'Helvetica, Arial, sans-serif',
+    helvb: 'Helvetica, Arial, sans-serif',
+    times: '"Times New Roman", Times, serif',
+    courier: '"Courier New", Courier, monospace',
+  }
+
+  // ---------- geometry ----------
+  const pageW = () => (dims[page].rotate % 180 === 0 ? dims[page].w : dims[page].h)
+  const pageH = () => (dims[page].rotate % 180 === 0 ? dims[page].h : dims[page].w)
+  const toPt = (cx, cy) => {
+    const r = over.getBoundingClientRect()
+    return [(cx - r.left) / zoom, (cy - r.top) / zoom]
+  }
+  const distSeg = (px, py, x1, y1, x2, y2) => {
+    const dx = x2 - x1, dy = y2 - y1
+    const l2 = dx * dx + dy * dy
+    let t = l2 ? ((px - x1) * dx + (py - y1) * dy) / l2 : 0
+    t = Math.max(0, Math.min(1, t))
+    return Math.hypot(x1 + t * dx - px, y1 + t * dy - py)
+  }
+
+  const edTextBox = (a) => {
+    const lines = String(a.text).split('\n')
+    return {
+      x: a.x, y: a.y,
+      w: Math.max(4, Math.max(...lines.map((l) => l.length)) * a.size * 0.5),
+      h: lines.length * a.size * 1.2,
+    }
+  }
+
+  const edBBox = (a) => {
+    if (a.pts?.length) {
+      let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9
+      for (const p of a.pts) {
+        const r = (p[2] ?? a.width ?? 2) / 2 + 1
+        x0 = Math.min(x0, p[0] - r); y0 = Math.min(y0, p[1] - r)
+        x1 = Math.max(x1, p[0] + r); y1 = Math.max(y1, p[1] + r)
+      }
+      return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+    }
+    if (a.t === 'line') {
+      const r = (a.width ?? 2) / 2 + 2
+      const x0 = Math.min(a.x1, a.x2) - r, y0 = Math.min(a.y1, a.y2) - r
+      return { x: x0, y: y0, w: Math.abs(a.x2 - a.x1) + 2 * r, h: Math.abs(a.y2 - a.y1) + 2 * r }
+    }
+    if (a.t === 'text') return edTextBox(a)
+    if (a.w !== undefined) return { x: a.x, y: a.y, w: a.w, h: a.h }
+    return null
+  }
+
+  const edResizable = (a) => a.t === 'image' || a.t === 'rect' || a.t === 'ellipse' || a.t === 'text'
+  const edCorners = (b) => [
+    ['nw', b.x, b.y], ['ne', b.x + b.w, b.y],
+    ['sw', b.x, b.y + b.h], ['se', b.x + b.w, b.y + b.h],
+  ]
+  const handleAt = (a, x, y) => {
+    const b = edBBox(a)
+    const hs = 6 / zoom // 12 css px hit target
+    for (const [id, cx, cy] of edCorners(b)) {
+      if (Math.abs(x - cx) <= hs && Math.abs(y - cy) <= hs) return id
+    }
+    return null
+  }
+
+  const edHit = (a, x, y) => {
+    if (a.pts) {
+      const tol = Math.max(6, (a.width ?? 4) / 2 + 4)
+      if (a.pts.length === 1) return Math.hypot(x - a.pts[0][0], y - a.pts[0][1]) < tol
+      for (let i = 1; i < a.pts.length; i++) {
+        const t2 = a.t === 'vstroke' ? Math.max(6, (a.pts[i][2] ?? 2) / 2 + 4) : tol
+        if (distSeg(x, y, a.pts[i - 1][0], a.pts[i - 1][1], a.pts[i][0], a.pts[i][1]) < t2) return true
+      }
+      return false
+    }
+    if (a.t === 'line') return distSeg(x, y, a.x1, a.y1, a.x2, a.y2) < Math.max(6, (a.width ?? 2) / 2 + 4)
+    const b = edBBox(a)
+    if (!b) return false
+    if (a.t === 'rect' || a.t === 'ellipse') {
+      if (a.fill) return x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h
+      const band = (a.lw ?? 2) / 2 + 4
+      const outer = x >= b.x - band && x <= b.x + b.w + band && y >= b.y - band && y <= b.y + b.h + band
+      const inner = x > b.x + band && x < b.x + b.w - band && y > b.y + band && y < b.y + b.h - band
+      return outer && !inner
+    }
+    return x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h // text, image
+  }
+
+  const pickAt = (x, y) => {
+    if (sel && edResizable(sel) && annots[page].includes(sel)) {
+      const c = handleAt(sel, x, y)
+      if (c) return { a: sel, corner: c }
+    }
+    const arr = annots[page]
+    for (let i = arr.length - 1; i >= 0; i--) if (edHit(arr[i], x, y)) return { a: arr[i] }
+    return null
+  }
+
+  // coords-only copy (jpeg bytes shared — they are never mutated in place)
+  const edSnap = (a) => {
+    const o = { ...a }
+    if (a.pts) o.pts = a.pts.map((p) => [...p])
+    return o
+  }
+  const edRestore = (a, o) => {
+    for (const k of ['x', 'y', 'x1', 'y1', 'x2', 'y2', 'w', 'h', 'size'])
+      if (o[k] !== undefined) a[k] = o[k]
+    if (o.pts) a.pts = o.pts.map((p) => [...p])
+  }
+  const edMove = (o, a, dx, dy) => {
+    if (o.pts) a.pts = o.pts.map((p) => [p[0] + dx, p[1] + dy, ...p.slice(2)])
+    if (o.x !== undefined) a.x = o.x + dx
+    if (o.y !== undefined) a.y = o.y + dy
+    if (o.x1 !== undefined) { a.x1 = o.x1 + dx; a.y1 = o.y1 + dy; a.x2 = o.x2 + dx; a.y2 = o.y2 + dy }
+  }
+  const edResize = (o, a, corner, x, y) => {
+    if (a.t === 'text') { // scale font about the opposite corner
+      const ob = edTextBox(o)
+      const opp = { nw: [ob.x + ob.w, ob.y + ob.h], ne: [ob.x, ob.y + ob.h], sw: [ob.x + ob.w, ob.y], se: [ob.x, ob.y] }[corner]
+      const oc = { nw: [ob.x, ob.y], ne: [ob.x + ob.w, ob.y], sw: [ob.x, ob.y + ob.h], se: [ob.x + ob.w, ob.y + ob.h] }[corner]
+      const d0 = Math.hypot(oc[0] - opp[0], oc[1] - opp[1]) || 1
+      const f = Math.max(0.1, Math.min(20, Math.hypot(x - opp[0], y - opp[1]) / d0))
+      a.size = Math.max(4, o.size * f)
+      a.x = corner[1] === 'w' ? opp[0] - ob.w * f : opp[0]
+      a.y = corner[0] === 'n' ? opp[1] - ob.h * f : opp[1]
+      return
+    }
+    const x1 = o.x + o.w, y1 = o.y + o.h
+    if (corner[1] === 'w') { a.x = Math.min(x, x1 - 4); a.w = x1 - a.x }
+    if (corner[1] === 'e') a.w = Math.max(4, x - o.x)
+    if (corner[0] === 'n') { a.y = Math.min(y, y1 - 4); a.h = y1 - a.y }
+    if (corner[0] === 's') a.h = Math.max(4, y - o.y)
+  }
+
+  // ---------- undo / redo ----------
+  const edCloneAnnots = () => annots.map((arr) => arr.map(edSnap))
+  const pushUndo = () => {
+    undoStack.push(edCloneAnnots())
+    if (undoStack.length > 50) undoStack.shift()
+    redoStack = []
+  }
+  const undo = () => {
+    if (!undoStack.length) return
+    redoStack.push(edCloneAnnots())
+    annots = undoStack.pop()
+    if (sel && !annots[page].includes(sel)) sel = null
+    afterMut()
+  }
+  const redo = () => {
+    if (!redoStack.length) return
+    undoStack.push(edCloneAnnots())
+    annots = redoStack.pop()
+    if (sel && !annots[page].includes(sel)) sel = null
+    afterMut()
+  }
+  const afterMut = () => { redraw(); updateChrome() }
+
+  // ---------- overlay painting ----------
+  const bmpFor = (a) => {
+    let b = bmpCache.get(a)
+    if (b === undefined) {
+      b = createImageBitmap(new Blob([a.jpeg], { type: 'image/jpeg' })).catch(() => null)
+      bmpCache.set(a, b)
+      b.then((r) => { bmpCache.set(a, r); if (root.isConnected) redraw() })
+      return null
+    }
+    return b instanceof ImageBitmap ? b : null
+  }
+
+  const drawAnnot = (c, a, S) => {
+    c.globalAlpha = a.alpha ?? 1
+    if (a.t === 'stroke' || a.t === 'highlight' || a.t === 'vstroke') {
+      c.strokeStyle = a.color
+      if (a.t === 'vstroke') {
+        for (let i = 1; i < a.pts.length; i++) {
+          const [x0, y0, w0] = a.pts[i - 1]
+          const [x1, y1, w1] = a.pts[i]
+          c.lineWidth = Math.max(0.5, ((w0 + w1) / 2) * S)
+          c.beginPath()
+          c.moveTo(x0 * S, y0 * S)
+          c.lineTo(x1 * S, y1 * S)
+          c.stroke()
+        }
+        if (a.pts.length === 1) {
+          const [x, y, w] = a.pts[0]
+          c.fillStyle = a.color
+          c.beginPath()
+          c.arc(x * S, y * S, Math.max(0.5, (w * S) / 2), 0, 7)
+          c.fill()
+        }
+      } else {
+        c.lineWidth = Math.max(0.5, (a.width ?? 2) * S)
+        c.beginPath()
+        a.pts.forEach((p, i) => (i ? c.lineTo(p[0] * S, p[1] * S) : c.moveTo(p[0] * S, p[1] * S)))
+        if (a.pts.length === 1) c.lineTo(a.pts[0][0] * S + 0.01, a.pts[0][1] * S)
+        c.stroke()
+      }
+    } else if (a.t === 'line') {
+      c.strokeStyle = a.color
+      c.lineWidth = Math.max(0.5, (a.width ?? 2) * S)
+      c.beginPath()
+      c.moveTo(a.x1 * S, a.y1 * S)
+      c.lineTo(a.x2 * S, a.y2 * S)
+      if (a.arrow) {
+        const ang = Math.atan2(a.y2 - a.y1, a.x2 - a.x1)
+        const hl = Math.max(8, (a.width ?? 2) * 3)
+        for (const s of [1, -1]) {
+          const th = ang + Math.PI + s * 0.45
+          c.moveTo(a.x2 * S, a.y2 * S)
+          c.lineTo((a.x2 + hl * Math.cos(th)) * S, (a.y2 + hl * Math.sin(th)) * S)
+        }
+      }
+      c.stroke()
+    } else if (a.t === 'rect' || a.t === 'ellipse') {
+      c.beginPath()
+      if (a.t === 'rect') c.rect(a.x * S, a.y * S, a.w * S, a.h * S)
+      else c.ellipse((a.x + a.w / 2) * S, (a.y + a.h / 2) * S, (a.w / 2) * S, (a.h / 2) * S, 0, 0, 7)
+      if (a.fill) { c.fillStyle = a.fill; c.fill() }
+      if (a.stroke) { c.strokeStyle = a.stroke; c.lineWidth = Math.max(0.5, (a.lw ?? 2) * S); c.stroke() }
+    } else if (a.t === 'text') {
+      // y anchors the TOP of the first line — baseline ≈ y+size (matches export)
+      c.fillStyle = a.color
+      c.font = `${a.font === 'helvb' ? '700 ' : ''}${a.size * S}px ${ED_FAM[a.font] ?? ED_FAM.helv}`
+      String(a.text).split('\n').forEach((ln, i) => c.fillText(ln, a.x * S, (a.y + a.size + i * a.size * 1.2) * S))
+    } else if (a.t === 'image') {
+      const b = bmpFor(a)
+      if (b) c.drawImage(b, a.x * S, a.y * S, a.w * S, a.h * S)
+      else { c.strokeStyle = '#71717b'; c.lineWidth = 1; c.strokeRect(a.x * S, a.y * S, a.w * S, a.h * S) }
+    }
+    c.globalAlpha = 1
+  }
+
+  const drawSel = (c, a, S) => {
+    const b = edBBox(a)
+    if (!b) return
+    const u = S / zoom // canvas px per css px — chrome stays constant on screen
+    c.save()
+    c.strokeStyle = '#34d399'
+    c.lineWidth = 1.5 * u
+    c.setLineDash([5 * u, 4 * u])
+    c.strokeRect((b.x - 4) * S, (b.y - 4) * S, (b.w + 8) * S, (b.h + 8) * S)
+    c.setLineDash([])
+    if (edResizable(a)) {
+      const hs = 4 / zoom // 8 css px squares at bbox corners
+      c.fillStyle = '#34d399'
+      c.strokeStyle = '#09090b'
+      for (const [, cx, cy] of edCorners(b)) {
+        c.fillRect((cx - hs) * S, (cy - hs) * S, hs * 2 * S, hs * 2 * S)
+        c.strokeRect((cx - hs) * S, (cy - hs) * S, hs * 2 * S, hs * 2 * S)
+      }
+    }
+    c.restore()
+  }
+
+  const redraw = () => {
+    if (!octx || !doc) return
+    const S = over.width / pageW() // backing px per pt
+    octx.clearRect(0, 0, over.width, over.height)
+    octx.lineJoin = 'round'
+    octx.lineCap = 'round'
+    for (const a of annots[page]) drawAnnot(octx, a, S)
+    if (draft) drawAnnot(octx, draft, S)
+    if (sel && annots[page].includes(sel)) drawSel(octx, sel, S)
+    positionChip()
+  }
+
+  const applyPageSize = () => {
+    pageEl.style.width = `${pageW() * zoom}px`
+    pageEl.style.height = `${pageH() * zoom}px`
+  }
+
+  // base raster: DOM size updates synchronously, bitmap follows async
+  const renderBase = async () => {
+    if (!doc) return
+    closeTextIn(true)
+    const my = ++baseGen
+    const W = pageW(), H = pageH()
+    const dpr = self.devicePixelRatio || 1
+    const bw = Math.max(2, Math.min(4096, Math.round(W * zoom * dpr)))
+    const bh = Math.max(2, Math.round((bw * H) / W))
+    applyPageSize()
+    base.width = over.width = bw
+    base.height = over.height = bh
+    const ctx = base.getContext('2d')
+    ctx.fillStyle = '#ffffff'
+    ctx.fillRect(0, 0, bw, bh)
+    redraw()
+    try {
+      const cv = await renderPage(doc, leaves[page], { width: bw, cache: imgCache })
+      if (my !== baseGen) return
+      if (cv) ctx.drawImage(cv, 0, 0, bw, bh)
+    } catch { /* blank page stays white */ }
+  }
+
+  // ---------- zoom / nav ----------
+  const setZoom = (z) => {
+    const nz = Math.max(0.25, Math.min(4, z))
+    if (nz === zoom) return
+    zoom = nz
+    renderBase()
+    updateChrome()
+  }
+
+  // zoom keeping the pt under (cx,cy) client coords stationary
+  const zoomAround = (cx, cy, z) => {
+    const nz = Math.max(0.25, Math.min(4, z))
+    if (nz === zoom) return
+    const r = pageEl.getBoundingClientRect()
+    const ax = (cx - r.left) / zoom, ay = (cy - r.top) / zoom
+    zoom = nz
+    if (pinch) {
+      // mid-pinch: leave backing canvases alone — CSS stretch keeps base +
+      // overlay aligned for free; a real re-raster runs when the pinch ends
+      applyPageSize()
+      redraw()
+    } else {
+      renderBase()
+    }
+    const r2 = pageEl.getBoundingClientRect()
+    stage.scrollLeft += r2.left + ax * zoom - cx
+    stage.scrollTop += r2.top + ay * zoom - cy
+    updateChrome()
+  }
+
+  const fitZoom = () => setZoom(Math.max(0.25, stage.clientWidth / pageW()))
+
+  const gotoPage = (i) => {
+    if (!doc || i < 0 || i >= leaves.length) return
+    cancelGesture()
+    page = i
+    sel = null
+    renderBase()
+    thumbsEl?.querySelectorAll('.edthumb').forEach((el, j) => el.classList.toggle('cur', j === page))
+    updateChrome()
+  }
+
+  // ---------- tools ----------
+  const shapeDraft = (x0, y0, x1, y1) => {
+    if (tool === 'line' || tool === 'arrow')
+      return { t: 'line', x1: x0, y1: y0, x2: x1, y2: y1, color, width: penWidth, alpha, arrow: tool === 'arrow' }
+    const x = Math.min(x0, x1), y = Math.min(y0, y1)
+    const w = Math.abs(x1 - x0), hgt = Math.abs(y1 - y0)
+    if (tool === 'rect') return { t: 'rect', x, y, w, h: hgt, stroke: color, fill: null, lw: penWidth, alpha }
+    if (tool === 'ellipse') return { t: 'ellipse', x, y, w, h: hgt, stroke: color, fill: null, lw: penWidth, alpha }
+    return { t: 'rect', x, y, w, h: hgt, stroke: null, fill: '#ffffff', lw: 0, alpha: 1 } // whiteout
+  }
+
+  const setTool = (t) => {
+    if (t === 'image') { pickImage(); return }
+    tool = t
+    closeTextIn(true)
+    for (const [k, b] of toolBtns) b.classList.toggle('on', k === t)
+    // draw modes own every gesture; select/text/eraser let the stage pan natively
+    // (pan-x pan-y still blocks browser pinch-zoom so our JS pinch keeps working)
+    over.style.touchAction = ED_DRAW.has(t) ? 'none' : 'pan-x pan-y'
+    over.style.cursor = t === 'select' ? 'default' : t === 'text' ? 'text' : 'crosshair'
+    if (t === 'hilite' && penWidth < 10) { penWidth = 14; syncOpts() }
+    updateChrome()
+  }
+
+  const pickImage = () => {
+    const inp = h('input', { type: 'file', accept: 'image/*', class: 'hidden-input' })
+    inp.addEventListener('cancel', () => inp.remove())
+    inp.onchange = async () => {
+      const f = inp.files?.[0]
+      inp.remove()
+      if (!f) return
+      try {
+        const bmp = await createImageBitmap(f)
+        const cv = document.createElement('canvas')
+        cv.width = bmp.width
+        cv.height = bmp.height
+        const cx = cv.getContext('2d')
+        cx.fillStyle = '#ffffff' // flatten alpha onto white
+        cx.fillRect(0, 0, cv.width, cv.height)
+        cx.drawImage(bmp, 0, 0)
+        const blob = await new Promise((res) => cv.toBlob(res, 'image/jpeg', 0.9))
+        if (!blob) throw new Error('encode failed')
+        const W = pageW(), H = pageH()
+        let w = Math.min(200, W - 40)
+        let hgt = (w * bmp.height) / bmp.width
+        if (hgt > H - 40) { hgt = H - 40; w = (hgt * bmp.width) / bmp.height }
+        const a = {
+          t: 'image', x: (W - w) / 2, y: (H - hgt) / 2, w, h: hgt,
+          jpeg: new Uint8Array(await blob.arrayBuffer()),
+        }
+        bmpCache.set(a, bmp)
+        pushUndo()
+        annots[page].push(a)
+        sel = a
+        setTool('select')
+        afterMut()
+      } catch {
+        error = 'could not read that image'
+        paint()
+      }
+    }
+    editorEl.append(inp)
+    inp.click()
+  }
+
+  const openTextIn = (x, y) => {
+    closeTextIn(true)
+    const ta = h('textarea', {
+      class: 'edtxtin',
+      rows: '1',
+      style: {
+        left: `${x * zoom}px`, top: `${y * zoom}px`,
+        fontSize: `${fontSize * zoom}px`, color,
+        fontFamily: ED_FAM[font], fontWeight: font === 'helvb' ? '700' : '400',
+      },
+      onkeydown: (e) => {
+        e.stopPropagation()
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); closeTextIn(true) }
+        else if (e.key === 'Escape') { e.preventDefault(); closeTextIn(false) }
+      },
+      onblur: () => closeTextIn(true),
+    })
+    txtIn = { ta, x, y }
+    pageEl.append(ta)
+    ta.focus()
+  }
+
+  const closeTextIn = (commit) => {
+    if (!txtIn) return
+    const { ta, x, y } = txtIn
+    txtIn = null // null first — removing the node re-fires blur
+    const text = ta.value.replace(/\s+$/, '')
+    ta.remove()
+    if (!commit || !text.trim()) return
+    pushUndo()
+    const a = { t: 'text', x, y, text, size: fontSize, color, font, alpha }
+    annots[page].push(a)
+    sel = a
+    afterMut()
+  }
+
+  const delSel = () => {
+    if (!sel) return
+    const arr = annots[page]
+    const i = arr.indexOf(sel)
+    if (i < 0) { sel = null; return }
+    pushUndo()
+    arr.splice(i, 1)
+    sel = null
+    afterMut()
+  }
+
+  const clearPage = () => {
+    if (!annots[page]?.length) return
+    pushUndo()
+    annots[page] = []
+    sel = null
+    afterMut()
+  }
+
+  // ---------- gestures ----------
+  const cancelGesture = () => {
+    if (drag && sel && (drag.kind === 'move' || drag.kind === 'resize')) {
+      if (drag.pushed) undoStack.pop()
+      edRestore(sel, drag.o)
+    }
+    draft = null
+    drag = null
+    tap = null
+    pendingDeselect = null
+    captureId = null
+    redraw()
+    updateChrome()
+  }
+
+  const onDown = (e) => {
+    if (!doc || (e.pointerType === 'mouse' && e.button !== 0)) return
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY })
+    if (pointers.size === 2) { // second finger → pinch, kill whatever was mid-flight
+      cancelGesture()
+      const [p, q] = [...pointers.values()]
+      pinch = { d: Math.hypot(p.x - q.x, p.y - q.y) }
+      return
+    }
+    if (pointers.size > 2) return
+    const [x, y] = toPt(e.clientX, e.clientY)
+    if (tool === 'select') {
+      const hit = pickAt(x, y)
+      if (hit) {
+        sel = hit.a
+        captureId = e.pointerId
+        over.setPointerCapture(e.pointerId)
+        drag = { kind: hit.corner ? 'resize' : 'move', corner: hit.corner, sx: x, sy: y, o: edSnap(hit.a), pushed: false }
+        e.preventDefault()
+      } else {
+        pendingDeselect = e.pointerId // confirmed on pointerup — pans must not deselect
+        over.setPointerCapture(e.pointerId) // else an off-canvas release leaks the pointers entry → phantom pinch
+      }
+      redraw()
+      updateChrome()
+    } else if (tool === 'pen' || tool === 'hilite') {
+      captureId = e.pointerId
+      over.setPointerCapture(e.pointerId)
+      const w = penWidth * (0.4 + 1.2 * (e.pressure || 0.5))
+      draft = tool === 'pen'
+        ? { t: 'vstroke', pts: [[x, y, w]], color, alpha }
+        : { t: 'highlight', pts: [[x, y]], color, width: penWidth, alpha: Math.min(alpha, 0.35) }
+      e.preventDefault()
+      redraw()
+    } else if (tool === 'text' || tool === 'eraser') {
+      tap = { id: e.pointerId, x, y } // act on pointerup so pans don't fire it
+      captureId = e.pointerId // capture so the up/cancel always reaches us
+      over.setPointerCapture(e.pointerId)
+    } else { // line, arrow, rect, ellipse, whiteout
+      captureId = e.pointerId
+      over.setPointerCapture(e.pointerId)
+      drag = { kind: 'shape', sx: x, sy: y }
+      draft = shapeDraft(x, y, x, y)
+      e.preventDefault()
+      redraw()
+    }
+  }
+
+  const onMove = (e) => {
+    const p = pointers.get(e.pointerId)
+    if (!p) return
+    p.x = e.clientX
+    p.y = e.clientY
+    if (pointers.size >= 2) {
+      if (pinch) {
+        const [a, b] = [...pointers.values()]
+        const d = Math.hypot(a.x - b.x, a.y - b.y)
+        if (d > 0 && pinch.d > 0) zoomAround((a.x + b.x) / 2, (a.y + b.y) / 2, (zoom * d) / pinch.d)
+        pinch.d = d
+      }
+      return
+    }
+    if (e.pointerId !== captureId) return
+    const [x, y] = toPt(e.clientX, e.clientY)
+    if (draft && (draft.t === 'vstroke' || draft.t === 'highlight')) {
+      for (const ev of e.getCoalescedEvents?.() ?? [e]) {
+        const [ex, ey] = toPt(ev.clientX, ev.clientY)
+        const last = draft.pts[draft.pts.length - 1]
+        if (Math.hypot(ex - last[0], ey - last[1]) < 0.6) continue
+        if (draft.t === 'vstroke') draft.pts.push([ex, ey, penWidth * (0.4 + 1.2 * (ev.pressure || 0.5))])
+        else draft.pts.push([ex, ey])
+      }
+      redraw()
+    } else if (drag?.kind === 'shape') {
+      draft = shapeDraft(drag.sx, drag.sy, x, y)
+      redraw()
+    } else if (drag?.kind === 'move' && sel) {
+      const dx = x - drag.sx, dy = y - drag.sy
+      if (dx || dy) {
+        if (!drag.pushed) { pushUndo(); drag.pushed = true; updateChrome() }
+        edMove(drag.o, sel, dx, dy)
+        redraw()
+      }
+    } else if (drag?.kind === 'resize' && sel) {
+      if (!drag.pushed) { pushUndo(); drag.pushed = true; updateChrome() }
+      edResize(drag.o, sel, drag.corner, x, y)
+      redraw()
+    }
+  }
+
+  const onUp = (e) => {
+    pointers.delete(e.pointerId)
+    if (e.pointerType === 'mouse' && e.button !== 0) return // stray right-release mid-drag commits nothing
+    if (pinch && pointers.size < 2) { pinch = null; renderBase() } // re-raster at final zoom
+    if (tap && tap.id === e.pointerId) {
+      const { x, y } = tap
+      tap = null
+      captureId = null
+      const [ux, uy] = toPt(e.clientX, e.clientY)
+      if (Math.hypot(ux - x, uy - y) > 8) return // dragged, not tapped
+      if (tool === 'text') openTextIn(x, y)
+      else { // eraser
+        const hit = pickAt(x, y)
+        if (hit) {
+          pushUndo()
+          const arr = annots[page]
+          arr.splice(arr.indexOf(hit.a), 1)
+          if (sel === hit.a) sel = null
+          afterMut()
+        }
+      }
+      return
+    }
+    if (pendingDeselect === e.pointerId) {
+      pendingDeselect = null
+      sel = null
+      redraw()
+      updateChrome()
+      return
+    }
+    if (e.pointerId !== captureId) return
+    captureId = null
+    if (draft) {
+      const d = draft
+      draft = null
+      const ok = d.pts ? d.pts.length >= 1
+        : d.t === 'line' ? Math.hypot(d.x2 - d.x1, d.y2 - d.y1) > 2
+        : d.w > 2 && d.h > 2
+      if (ok) {
+        pushUndo()
+        annots[page].push(d)
+        sel = d
+      }
+      afterMut()
+    }
+    drag = null
+  }
+
+  const onCancel = (e) => {
+    pointers.delete(e.pointerId)
+    if (pinch && pointers.size < 2) { pinch = null; renderBase() }
+    cancelGesture()
+  }
+
+  const onWheel = (e) => {
+    if (!e.ctrlKey && !e.metaKey) return
+    e.preventDefault()
+    zoomAround(e.clientX, e.clientY, zoom * Math.exp(-e.deltaY * (e.deltaMode === 1 ? 16 : 1) * 0.0018))
+  }
+
+  const onTouchStart = (e) => {
+    if (e.touches.length > 1) { e.preventDefault(); return } // our pinch, not the browser's
+    if (tool !== 'select') return
+    const t = e.touches[0]
+    if (!t) return
+    const [x, y] = toPt(t.clientX, t.clientY)
+    if (pickAt(x, y)) e.preventDefault() // block native pan so pointer events drive the drag
+  }
+
+  // ---------- build ----------
+  const buildThumbs = () => {
+    thumbObs?.disconnect()
+    thumbObs = null
+    setKids(thumbsEl)
+    const render1 = (cell, i) => {
+      renderPage(doc, leaves[i], { width: 180, cache: imgCache })
+        .then((cv) => { if (cv && cell.isConnected) { cv.className = 'edthumbc'; cell.prepend(cv) } })
+        .catch(() => {})
+    }
+    const cells = dims.map((d, i) => {
+      const W = d.rotate % 180 === 0 ? d.w : d.h
+      const H = d.rotate % 180 === 0 ? d.h : d.w
+      const cell = h('button', {
+        type: 'button', class: 'edthumb' + (i === page ? ' cur' : ''), title: `Page ${i + 1}`,
+        style: { aspectRatio: `${W} / ${H}` },
+        onclick: () => gotoPage(i),
+      }, h('span', { class: 'edthumbn' }, String(i + 1)))
+      thumbsEl.append(cell)
+      return cell
+    })
+    if ('IntersectionObserver' in window) {
+      thumbObs = new IntersectionObserver((ents) => {
+        for (const en of ents) {
+          if (!en.isIntersecting) continue
+          thumbObs.unobserve(en.target)
+          render1(en.target, cells.indexOf(en.target))
+        }
+      }, { root: thumbsEl, rootMargin: '120px' })
+      cells.forEach((c) => thumbObs.observe(c))
+    } else {
+      cells.forEach((c, i) => render1(c, i))
+    }
+  }
+
+  const build = () => {
+    toolBtns = new Map()
+    metaEl = h('p', { class: 'meta dim' })
+
+    const toolRow = h('div', { class: 'edtools' })
+    for (const [t, label] of ED_TOOLS) {
+      const b = h('button', { type: 'button', class: 'edt', onclick: () => setTool(t) }, label)
+      toolBtns.set(t, b)
+      toolRow.append(b)
+    }
+
+    swatchEls = []
+    const swatches = h('div', { class: 'edsws' },
+      ED_COLORS.map((c) => {
+        const b = h('button', {
+          type: 'button', class: 'edsw', title: c, style: { background: c },
+          onclick: () => { color = c; syncOpts() },
+        })
+        swatchEls.push([c, b])
+        return b
+      }),
+      colorPick = h('input', {
+        type: 'color', class: 'edpick', value: color, title: 'Custom color',
+        oninput: (e) => { color = e.target.value; syncOpts() },
+      }))
+    widthLbl = h('span', { class: 'edrangev' })
+    widthSlider = h('input', {
+      type: 'range', min: '1', max: '40', value: String(penWidth), class: 'slider edslider',
+      oninput: (e) => { penWidth = +e.target.value; syncOpts() },
+    })
+    const widthWrap = h('label', { class: 'edopt' }, 'Stroke', widthSlider, widthLbl)
+    alphaLbl = h('span', { class: 'edrangev' })
+    alphaSlider = h('input', {
+      type: 'range', min: '10', max: '100', value: '100', class: 'slider edslider',
+      oninput: (e) => { alpha = +e.target.value / 100; syncOpts() },
+    })
+    const alphaWrap = h('label', { class: 'edopt' }, 'Opacity', alphaSlider, alphaLbl)
+    fontWrap = h('span', { class: 'edtext' },
+      h('select', { class: 'textin sel edfont', onchange: (e) => (font = e.target.value) },
+        ED_FONTS.map(([v, l]) => h('option', { value: v, selected: v === font || undefined }, l))),
+      h('input', {
+        type: 'number', class: 'textin num ednum', min: '8', max: '72', value: String(fontSize), title: 'Font size (pt)',
+        oninput: (e) => { fontSize = Math.max(8, Math.min(72, +e.target.value || 16)) },
+      }))
+    const optsRow = h('div', { class: 'edopts' }, swatches, widthWrap, alphaWrap, fontWrap)
+
+    prevBtn = h('button', { type: 'button', class: 'edt', onclick: () => gotoPage(page - 1) }, '‹ Prev')
+    pageLbl = h('span', { class: 'edpgl' })
+    nextBtn = h('button', { type: 'button', class: 'edt', onclick: () => gotoPage(page + 1) }, 'Next ›')
+    zoomLbl = h('span', { class: 'edpgl' })
+    actionSlot = h('div', { class: 'edacts' })
+    const navRow = h('div', { class: 'ednav' },
+      prevBtn, pageLbl, nextBtn, h('span', { class: 'edsep' }),
+      h('button', { type: 'button', class: 'edt', title: 'Zoom out', onclick: () => setZoom(zoom / 1.25) }, '−'),
+      zoomLbl,
+      h('button', { type: 'button', class: 'edt', title: 'Zoom in', onclick: () => setZoom(zoom * 1.25) }, '+'),
+      h('button', { type: 'button', class: 'edt', title: 'Fit width', onclick: fitZoom }, 'Fit'),
+      h('span', { class: 'edsep' }),
+      actionSlot)
+
+    base = h('canvas', { class: 'edbase' })
+    over = h('canvas', { class: 'edover' })
+    octx = over.getContext('2d')
+    delChip = iconBtn('x', 'Delete annotation', (e) => { e.stopPropagation(); delSel() })
+    delChip.classList.add('edsel')
+    delChip.style.display = 'none'
+    pageEl = h('div', { class: 'edpage' }, base, over, delChip)
+    stage = h('div', { class: 'edwrap' }, pageEl)
+    thumbsEl = h('div', { class: 'edthumbs' })
+    dlBtn = Btn('Download edited PDF', { onclick: run })
+    editorEl = h('div', { class: 'ed' }, metaEl, toolRow, optsRow, navRow, stage, thumbsEl, dlBtn)
+
+    over.addEventListener('pointerdown', onDown)
+    over.addEventListener('pointermove', onMove)
+    over.addEventListener('pointerup', onUp)
+    over.addEventListener('pointercancel', onCancel)
+    over.addEventListener('touchstart', onTouchStart, { passive: false })
+    over.addEventListener('contextmenu', (e) => e.preventDefault())
+    stage.addEventListener('wheel', onWheel, { passive: false })
+
+    setTool('select')
+    syncOpts()
+    buildThumbs()
+  }
+
+  const positionChip = () => {
+    if (!delChip) return
+    const b = sel && annots[page]?.includes(sel) ? edBBox(sel) : null
+    if (!b) { delChip.style.display = 'none'; return }
+    delChip.style.display = ''
+    delChip.style.left = `${(b.x + b.w) * zoom + 4}px`
+    delChip.style.top = `${b.y * zoom - 12}px`
+  }
+
+  const syncOpts = () => {
+    for (const [c, b] of swatchEls) b.classList.toggle('on', c === color)
+    if (colorPick) colorPick.value = color
+    if (widthSlider) widthSlider.value = String(penWidth)
+    if (widthLbl) widthLbl.textContent = `${penWidth}pt`
+    if (alphaSlider) alphaSlider.value = String(Math.round(alpha * 100))
+    if (alphaLbl) alphaLbl.textContent = `${Math.round(alpha * 100)}%`
+  }
+
+  const updateChrome = () => {
+    if (!editorEl) return
+    const total = annots.reduce((n, a) => n + a.length, 0)
+    metaEl.textContent =
+      `${file.name} · ${fmtBytes(file.size)} · ${leaves.length} page${leaves.length > 1 ? 's' : ''} · ` +
+      `${total} annotation${total === 1 ? '' : 's'}`
+    pageLbl.textContent = `p ${page + 1} / ${leaves.length}`
+    zoomLbl.textContent = `${Math.round(zoom * 100)}%`
+    prevBtn.disabled = page === 0
+    nextBtn.disabled = page === leaves.length - 1
+    for (const [t, b] of toolBtns) b.classList.toggle('on', t === tool)
+    fontWrap.style.display = tool === 'text' ? '' : 'none'
+    setKids(actionSlot, Toolbar([
+      ['↶ Undo', undo, !undoStack.length],
+      ['↷ Redo', redo, !redoStack.length],
+      ['Clear page', clearPage, !annots[page]?.length],
+    ]))
+    setKids(dlBtn, h('span', { class: 'edbtnin' }, icon('download', 'icon-sm'), busy ? 'Working…' : 'Download edited PDF'))
+    dlBtn.disabled = busy
+    positionChip()
+  }
+
+  // ---------- load / export ----------
+  const load = async ([f]) => {
+    const my = ++loadGen
+    error = ''
+    file = f
+    bytes = null
+    doc = null
+    editorEl = null
+    annots = []
+    sel = null
+    undoStack = []
+    redoStack = []
+    pointers.clear() // a load mid-gesture must not leak pointer/pinch/draft state
+    pinch = null
+    cancelGesture()
+    imgCache.clear()
+    thumbObs?.disconnect()
+    thumbObs = null
+    paint()
+    try {
+      const b = await readBytes(f)
+      if (my !== loadGen) return
+      const d = await parsePdf(b)
+      if (my !== loadGen) return
+      bytes = b
+      doc = d
+      leaves = pageLeaves(d)
+      dims = pageDims(d)
+      annots = leaves.map(() => [])
+      page = 0
+      zoom = 1
+      build()
+      paint()
+      gotoPage(0)
+      if (pageW() * zoom > stage.clientWidth) fitZoom() // small screens open fit-width
+    } catch (e) {
+      if (my !== loadGen) return
+      error = e.message || 'could not read that PDF'
+      file = null
+      doc = null
+      paint()
+    }
+  }
+
+  const run = async () => {
+    busy = true
+    error = ''
+    updateChrome()
+    try {
+      const out = await annotatePdf(bytes, annots)
+      saveBlob(new Blob([out], { type: 'application/pdf' }), `${file.name.replace(/\.pdf$/i, '')}-edited.pdf`)
+    } catch (e) {
+      error = e.message || 'export failed'
+      paint()
+    } finally {
+      busy = false
+      updateChrome()
+    }
+  }
+
+  function paint() {
+    setKids(root,
+      DropZone({ accept: 'application/pdf', onFiles: load }),
+      editorEl,
+      ErrorText(error))
+  }
+
+  // keyboard: Ctrl+Z/Y undo-redo, Del deletes selection, Esc cancels — self-removes when detached
+  const onKey = (e) => {
+    if (!root.isConnected) {
+      thumbObs?.disconnect()
+      return document.removeEventListener('keydown', onKey)
+    }
+    if (!doc || /input|textarea|select/i.test(e.target.tagName)) return
+    const mod = e.ctrlKey || e.metaKey
+    const k = e.key.toLowerCase()
+    if (mod && k === 'z' && !e.shiftKey) { e.preventDefault(); undo() }
+    else if (mod && (k === 'y' || (k === 'z' && e.shiftKey))) { e.preventDefault(); redo() }
+    else if ((e.key === 'Delete' || e.key === 'Backspace') && sel) { e.preventDefault(); delSel() }
+    else if (e.key === 'Escape') {
+      if (draft || drag) cancelGesture()
+      else if (sel) { sel = null; afterMut() }
+    }
+  }
+  document.addEventListener('keydown', onKey)
+
+  paint()
   return root
 }
 
@@ -4817,6 +6211,7 @@ function Scrub() {
 // ---- src/app.js ----
 
 const TOOLS = [
+  { id: 'edit', name: 'Edit PDF', desc: 'Draw, highlight, write and stamp — a real editor', icon: 'pencil', view: Edit },
   { id: 'merge', name: 'Merge PDF', desc: 'Combine PDFs into one, in your order', icon: 'files', view: Merge },
   { id: 'split', name: 'Split PDF', desc: 'Pull out page ranges — one file or a zip', icon: 'scissors', view: Split },
   { id: 'organize', name: 'Organize pages', desc: 'Reorder, rotate and delete pages visually', icon: 'grid', view: Organize },

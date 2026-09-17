@@ -424,22 +424,28 @@ async function stampPages(bytes, stampFor) {
     const dw = rot % 180 === 0 ? w : hh
     const dh = rot % 180 === 0 ? hh : w
 
-    const stamp = stampFor({ leaf, i, total: leaves.length, mb, rot, w, hh, dw, dh })
+    const stamp = stampFor({ leaf, i, total: leaves.length, mb, rot, w, hh, dw, dh, dst })
     if (stamp) {
       const csNum = dst.alloc()
       dst.set(csNum, stream(new Map(), new TextEncoder().encode(stamp.content)))
-      const contents = pageDict.get('Contents')
+      let contents = pageDict.get('Contents')
+      if (isRef(contents)) { // qpdf-style: Contents is a ref TO an array of stream refs
+        const c = dst.objects.get(contents.n)
+        if (Array.isArray(c)) contents = c
+      }
       const arr = Array.isArray(contents) ? contents.slice() : contents !== undefined ? [contents] : []
       arr.push(ref(csNum, 0))
       pageDict.set('Contents', arr.length === 1 ? arr[0] : arr)
 
       let res = pageDict.get('Resources')
       if (isRef(res)) res = dst.objects.get(res.n)
-      if (!(res instanceof Map)) res = new Map()
+      // clone before mutating: an inherited/shared Resources dict is one copied
+      // Map reachable from every page — in-place adds would leak across pages
+      res = res instanceof Map ? new Map(res) : new Map()
       for (const [section, entries] of Object.entries(stamp.res ?? {})) {
         let sec = res.get(section)
         if (isRef(sec)) sec = dst.objects.get(sec.n)
-        if (!(sec instanceof Map)) sec = new Map()
+        sec = sec instanceof Map ? new Map(sec) : new Map()
         for (const [nm, val] of Object.entries(entries)) if (!sec.has(nm)) sec.set(nm, val)
         res.set(section, sec)
       }
@@ -507,6 +513,206 @@ export async function watermarkPdf(
         ExtGState: { GSwm: new Map([['ca', opacity], ['CA', opacity]]) },
       },
     }
+  })
+}
+
+// ---------- edit annotations ----------
+
+/** Unicode → CP1252 byte for the 0x80–0x9F range (differs from latin1). */
+const ANN_CP1252 = new Map([
+  [0x20ac, 0x80], [0x201a, 0x82], [0x0192, 0x83], [0x201e, 0x84], [0x2026, 0x85],
+  [0x2020, 0x86], [0x2021, 0x87], [0x02c6, 0x88], [0x2030, 0x89], [0x0160, 0x8a],
+  [0x2039, 0x8b], [0x0152, 0x8c], [0x017d, 0x8e], [0x2018, 0x91], [0x2019, 0x92],
+  [0x201c, 0x93], [0x201d, 0x94], [0x2022, 0x95], [0x2013, 0x96], [0x2014, 0x97],
+  [0x02dc, 0x98], [0x2122, 0x99], [0x0161, 0x9a], [0x203a, 0x9b], [0x0153, 0x9c],
+  [0x017e, 0x9e], [0x0178, 0x9f],
+])
+
+/** WinAnsi literal string: CP1252 bytes, high/control bytes as \ooo, else '?'. */
+const annStr = (s) => {
+  let out = '('
+  for (const ch of s) {
+    const cp = ch.codePointAt(0)
+    const b = cp < 0x80 ? cp : cp >= 0xa0 && cp < 0x100 ? cp : ANN_CP1252.get(cp) ?? 0x3f
+    if (b === 0x28 || b === 0x29 || b === 0x5c) out += '\\' + String.fromCharCode(b)
+    else if (b >= 0x20 && b < 0x7f) out += String.fromCharCode(b)
+    else out += '\\' + b.toString(8).padStart(3, '0')
+  }
+  return out + ')'
+}
+
+const annNum = (v) => +v.toFixed(2)
+
+/** '#rrggbb' → 'r g b' (0–1 floats, 3 decimals) or null. */
+const annColor = (hex) => {
+  const m = /^#([0-9a-f]{6})$/i.exec(typeof hex === 'string' ? hex : '')
+  if (!m) return null
+  const n = parseInt(m[1], 16)
+  return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255]
+    .map((c) => c.toFixed(3)).join(' ')
+}
+
+const ANN_FONTS = {
+  helv: ['ANN_F1', 'Helvetica'],
+  helvb: ['ANN_F2', 'Helvetica-Bold'],
+  times: ['ANN_F3', 'Times-Roman'],
+  courier: ['ANN_F4', 'Courier'],
+}
+const ANN_KAPPA = 0.5523
+
+const annFontDict = (base) => new Map([
+  ['Type', name('Font')], ['Subtype', name('Type1')], ['BaseFont', name(base)],
+])
+
+/**
+ * Bake UI annotations into pages as real PDF operators.
+ * pagesAnnots[p] (0-based) = [{t, ...}] in DISPLAY-space pt (top-left origin,
+ * y down, dims dw×dh); falsy/empty entries leave the page untouched.
+ * Shapes: stroke {pts,color,width}, vstroke {pts:[x,y,w]}, highlight {pts,
+ * color,width}, line {x1,y1,x2,y2,arrow?}, rect/ellipse {x,y,w,h,stroke,fill,
+ * lw}, text {x,y,text,size,font} (x,y = TOP of first line; baseline = y+size,
+ * leading 1.2×size),
+ * image {x,y,w,h,jpeg}. Appends one content stream per touched page and merges
+ * ANN_* resources (fonts, ExtGState, XObjects) into page Resources.
+ */
+export async function annotatePdf(bytes, pagesAnnots) {
+  return stampPages(bytes, ({ i, mb, rot, w, hh, dh, dst }) => {
+    const anns = pagesAnnots?.[i]
+    if (!Array.isArray(anns) || !anns.length) return null
+    // display→user wrap: after this cm all coords are display space (y down)
+    const dispLin = rot === 90 ? [0, 1, 1, 0]
+      : rot === 180 ? [-1, 0, 0, 1]
+      : rot === 270 ? [0, -1, -1, 0]
+      : [1, 0, 0, -1]
+    const [xu0, yu0] = stampPos(rot, 0, dh, w, hh)
+    const wrap = `${dispLin.join(' ')} ${annNum(mb[0] + xu0)} ${annNum(mb[1] + yu0)} cm`
+    const res = {}
+    const ops = []
+    let gsN = 0, imN = 0
+    const gsFor = (alpha, multiply) => {
+      const d = new Map([['ca', alpha], ['CA', alpha]])
+      if (multiply) d.set('BM', name('Multiply'))
+      const nm = `ANN_GS${++gsN}`
+      ;(res.ExtGState ??= {})[nm] = d
+      return `/${nm} gs`
+    }
+    const pt2 = (p) => Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1])
+    const num = (v) => Number.isFinite(v) ? annNum(v) : '0'
+    for (const a of anns) {
+      if (!a || typeof a !== 'object') continue
+      const alpha = typeof a.alpha === 'number' ? Math.min(1, Math.max(0, a.alpha)) : null
+      const needsGs = a.t === 'highlight' || (alpha !== null && alpha < 1)
+      const gs = needsGs ? gsFor(alpha ?? 0.35, a.t === 'highlight') : ''
+      const color = annColor(a.color)
+      const parts = []
+      switch (a.t) {
+        case 'stroke':
+        case 'highlight': {
+          if (!color || !Array.isArray(a.pts) || a.pts.length < 1 || !a.pts.every(pt2)) break
+          const w0 = a.t === 'highlight' ? (a.width ?? 12) : (a.width ?? 2)
+          const path = a.pts.length === 1
+            ? `${num(a.pts[0][0])} ${num(a.pts[0][1])} m ${num(a.pts[0][0] + 0.01)} ${num(a.pts[0][1])} l` // tap-dot
+            : a.pts.map((p, k) => `${num(p[0])} ${num(p[1])} ${k ? 'l' : 'm'}`).join(' ')
+          parts.push(`${color} RG ${num(w0)} w 1 J 1 j ${path} S`)
+          break
+        }
+        case 'vstroke': {
+          if (!color || !Array.isArray(a.pts) || a.pts.length < 1) break
+          const segs = []
+          for (let k = 0; k + 1 < a.pts.length; k++) {
+            const [p, q] = [a.pts[k], a.pts[k + 1]]
+            if (!pt2(p) || !pt2(q)) continue
+            const sw = Math.min(60, Math.max(0.3, typeof p[2] === 'number' ? p[2] : 1))
+            segs.push(`${num(sw)} w ${num(p[0])} ${num(p[1])} m ${num(q[0])} ${num(q[1])} l S`)
+          }
+          if (!segs.length && a.pts.length === 1 && pt2(a.pts[0])) { // tap-dot
+            const p = a.pts[0]
+            const sw = Math.min(60, Math.max(0.3, typeof p[2] === 'number' ? p[2] : 1))
+            segs.push(`${num(sw)} w ${num(p[0])} ${num(p[1])} m ${num(p[0] + 0.01)} ${num(p[1])} l S`)
+          }
+          if (!segs.length) break
+          parts.push(`${color} RG 1 J 1 j ${segs.join(' ')}`)
+          break
+        }
+        case 'line': {
+          if (!color || ![a.x1, a.y1, a.x2, a.y2].every(Number.isFinite)) break
+          const lw = typeof a.width === 'number' && a.width > 0 ? a.width : 2
+          parts.push(`${color} RG ${num(lw)} w ${num(a.x1)} ${num(a.y1)} m ${num(a.x2)} ${num(a.y2)} l S`)
+          if (a.arrow) {
+            const ang = Math.atan2(a.y2 - a.y1, a.x2 - a.x1)
+            const L = Math.min(60, 3 * lw)
+            const [bx, by] = [a.x2 - L * Math.cos(ang), a.y2 - L * Math.sin(ang)]
+            const [px, py] = [-Math.sin(ang) * L * 0.45, Math.cos(ang) * L * 0.45]
+            parts.push(
+              `${color} rg ${num(a.x2)} ${num(a.y2)} m ${num(bx + px)} ${num(by + py)} l ` +
+              `${num(bx - px)} ${num(by - py)} l h f`,
+            )
+          }
+          break
+        }
+        case 'rect':
+        case 'ellipse': {
+          if (![a.x, a.y, a.w, a.h].every(Number.isFinite)) break
+          const fill = annColor(a.fill), strokeC = annColor(a.stroke)
+          if (!fill && !strokeC) break
+          const lw = typeof a.lw === 'number' && a.lw > 0 ? a.lw : 1
+          let path
+          if (a.t === 'rect') {
+            path = `${num(a.x)} ${num(a.y)} ${num(a.w)} ${num(a.h)} re`
+          } else {
+            const [cx, cy, rx, ry, k] = [a.x + a.w / 2, a.y + a.h / 2, a.w / 2, a.h / 2, ANN_KAPPA]
+            path =
+              `${num(cx + rx)} ${num(cy)} m ` +
+              `${num(cx + rx)} ${num(cy - k * ry)} ${num(cx + k * rx)} ${num(cy - ry)} ${num(cx)} ${num(cy - ry)} c ` +
+              `${num(cx - k * rx)} ${num(cy - ry)} ${num(cx - rx)} ${num(cy - k * ry)} ${num(cx - rx)} ${num(cy)} c ` +
+              `${num(cx - rx)} ${num(cy + k * ry)} ${num(cx - k * rx)} ${num(cy + ry)} ${num(cx)} ${num(cy + ry)} c ` +
+              `${num(cx + k * rx)} ${num(cy + ry)} ${num(cx + rx)} ${num(cy + k * ry)} ${num(cx + rx)} ${num(cy)} c h`
+          }
+          const paint = fill && strokeC ? 'B' : fill ? 'f' : 'S'
+          parts.push(
+            `${fill ? `${fill} rg ` : ''}${strokeC ? `${strokeC} RG ` : ''}${num(lw)} w ${path} ${paint}`,
+          )
+          break
+        }
+        case 'text': {
+          const size = typeof a.size === 'number' && a.size > 0 ? a.size : null
+          const [fname, base] = ANN_FONTS[a.font] ?? ANN_FONTS.helv
+          if (!color || !size || typeof a.text !== 'string' || !a.text.length ||
+              ![a.x, a.y].every(Number.isFinite)) break
+          ;(res.Font ??= {})[fname] = annFontDict(base)
+          const lines = a.text.split('\n')
+          lines.forEach((line, li) => {
+            const yTd = a.y + size + li * size * 1.2 // baseline = top + one em
+            const [xu, yu, m] = stampPos(rot, a.x, dh - yTd, w, hh)
+            ops.push(
+              `q ${gs} ${m.join(' ')} ${annNum(mb[0] + xu)} ${annNum(mb[1] + yu)} cm ` +
+              `${color} rg BT /${fname} ${num(size)} Tf 0 0 Td ${annStr(line)} Tj ET Q`,
+            )
+          })
+          break
+        }
+        case 'image': {
+          if (!(a.jpeg instanceof Uint8Array) || ![a.x, a.y, a.w, a.h].every(Number.isFinite)) break
+          let info
+          try { info = jpegInfo(a.jpeg) } catch { break } // non-JPEG → skip
+          const imNum = dst.alloc()
+          dst.set(imNum, stream(new Map([
+            ['Type', name('XObject')], ['Subtype', name('Image')],
+            ['Width', info.width], ['Height', info.height],
+            ['ColorSpace', name(info.colorSpace)], ['BitsPerComponent', 8],
+            ['Filter', name('DCTDecode')],
+          ]), a.jpeg))
+          const nm = `ANN_Im${++imN}`
+          ;(res.XObject ??= {})[nm] = ref(imNum, 0)
+          parts.push(`${num(a.w)} 0 0 ${num(-a.h)} ${num(a.x)} ${num(a.y + a.h)} cm /${nm} Do`)
+          break
+        }
+      }
+      if (parts.length) ops.push(`q ${wrap} ${[gs, ...parts].filter(Boolean).join(' ')} Q`)
+    }
+    // leading \n keeps our first op from merging with the previous stream's
+    // last token (Contents arrays concatenate without a separator)
+    return ops.length ? { content: '\n' + ops.join('\n'), res } : null
   })
 }
 

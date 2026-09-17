@@ -33,7 +33,8 @@ Open devtools → network tab. Zero requests carrying your documents — there i
 
 - **Merge PDF** — combine any number of PDFs, your order, with rendered page thumbnails
 - **Split PDF** — visual page picker or ranges (`1-3, 5, 8-10`), one file or a zip of separate PDFs/pages
-- **Organize pages** — rendered page previews, drag-reorder, move-to-position, duplicate, rotate, delete/restore, undo (Ctrl+Z), extract selected
+- **Organize pages** — rendered page previews, grab-&-swap reordering (touch hold-drag too), move-to-position, duplicate, rotate, delete/restore, undo (Ctrl+Z), extract selected
+- **Edit PDF** — draw, highlight, text, lines/shapes/arrows, whiteout, image stamps, select/move/delete, undo/redo, pinch-zoom — annotations are written into the PDF as real content-stream operators
 - **Images to PDF** — JPG/PNG/WebP/GIF/BMP → PDF with page size / orientation / margin / fit controls
 - **Extract images** — pull embedded images, deduped by content hash, zip or individual
 - **Page numbers** — position, format (incl. custom `{n}`/`{t}`), start-at, skip-first, margin

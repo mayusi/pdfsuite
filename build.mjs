@@ -26,6 +26,7 @@ const MODULES = [
   'src/tools/merge.js',
   'src/tools/split.js',
   'src/tools/organize.js',
+  'src/tools/edit.js',
   'src/tools/img2pdf.js',
   'src/tools/extract.js',
   'src/tools/pagenum.js',
