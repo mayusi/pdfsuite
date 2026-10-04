@@ -8,6 +8,7 @@ import { deflate } from './env.js'
 import { toWinAnsi } from './encodings.js'
 import { stdWidth } from './metrics.js'
 import { textString } from './outline.js'
+import { pageBox, pageRotation } from './content.js'
 import { copyValue, pageLeaves, finishDoc, jpegInfo, INHERITED } from './ops.js'
 
 /** Display→user position + counter-rotation matrix for /Rotate'd pages. */
@@ -108,7 +109,7 @@ export async function imageXObject(dst, img) {
  * (an unbalanced cm, a clip) can never shift or hide the stamp.
  */
 export async function stampPages(bytes, stampFor, { pages = null } = {}) {
-  const src = await parsePdf(bytes)
+  const src = bytes instanceof Uint8Array ? await parsePdf(bytes) : bytes // a parsed (possibly pre-edited) doc is fine too
   const leaves = pageLeaves(src)
   const dst = newDoc()
   const pagesRef = dst.alloc()
@@ -140,10 +141,9 @@ export async function stampPages(bytes, stampFor, { pages = null } = {}) {
     }
     pageDict.set('Type', name('Page'))
     pageDict.set('Parent', ref(pagesRef, 0))
-    const mbR = deref(src, get(leaf.dict, 'MediaBox') ?? leaf.inh.MediaBox)
-    const mb = Array.isArray(mbR) ? mbR.map((v) => deref(src, v)) : [0, 0, 612, 792]
-    const rotSrc = deref(src, get(leaf.dict, 'Rotate') ?? leaf.inh.Rotate ?? 0)
-    const rot = typeof rotSrc === 'number' ? ((rotSrc % 360) + 360) % 360 : 0
+    // the VISIBLE box (CropBox ∩ MediaBox) — what viewers and our editor show
+    const mb = pageBox(src, leaf)
+    const rot = pageRotation(src, leaf)
     const w = mb[2] - mb[0], hh = mb[3] - mb[1]
     const dw = rot % 180 === 0 ? w : hh
     const dh = rot % 180 === 0 ? hh : w

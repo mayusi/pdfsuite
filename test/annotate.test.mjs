@@ -2,10 +2,8 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { parsePdf, deref } from '../src/pdf/parse.js'
 import { dec, enc, get, isStream, name, ref, stream } from '../src/pdf/types.js'
-import {
-  collectDrawOps, contentBytes, pageLeaves, streamData,
-  tokenizeContent,
-} from '../src/pdf/ops.js'
+import { pageLeaves } from '../src/pdf/ops.js'
+import { collectDrawOps, contentBytes, streamData, tokenizeContent } from '../src/pdf/content.js'
 import { annotatePdf } from '../src/pdf/stamp.js'
 
 // ---------- fixtures ----------

@@ -5,7 +5,7 @@ import { concat, enc, get, isName, isRef, isStream, name, ref, stream, typeIs, d
 import { deref, parsePdf, parseValue } from './parse.js'
 import { newDoc, writeDoc } from './write.js'
 import { aesCbcDecrypt, aesCbcEncrypt, md5, rc4, sha256, sha384, sha512 } from './crypto.js'
-import { streamData } from './ops.js'
+import { streamData } from './content.js'
 
 const PAD32 = new Uint8Array([
   0x28, 0xbf, 0x4e, 0x5e, 0x4e, 0x75, 0x8a, 0x41, 0x64, 0x00, 0x4e, 0x56, 0xff, 0xfa, 0x01, 0x08,

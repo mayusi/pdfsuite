@@ -4,12 +4,8 @@ import { deflateSync } from 'node:zlib'
 import { parsePdf, deref } from '../src/pdf/parse.js'
 import { dec, enc, get, isStream, name, ref, set, stream, typeIs } from '../src/pdf/types.js'
 import { newDoc, writeDoc } from '../src/pdf/write.js'
-import {
-  collectDrawOps, decodeString, displayTransform, extractImages,
-  extractPages, fontMap, imagesToPdf, jpegInfo, mergePdfs,
-  organizePages, pageCount, pageDims, pageLeaves, pagePreview, parseRanges,
-  parseToUnicode, readMetadata, scrubPdf, splitPdf, tokenizeContent,
-} from '../src/pdf/ops.js'
+import { extractImages, extractPages, imagesToPdf, jpegInfo, mergePdfs, organizePages, pageCount, pageDims, pageLeaves, pagePreview, parseRanges, readMetadata, scrubPdf, splitPdf } from '../src/pdf/ops.js'
+import { collectDrawOps, decodeString, displayTransform, fontMap, parseToUnicode, tokenizeContent } from '../src/pdf/content.js'
 import { unPredict } from '../src/pdf/filters.js'
 import { addPageNumbers } from '../src/pdf/stamp.js'
 import { crc32, zipStore } from '../src/zip.js'
@@ -763,8 +759,10 @@ describe('renderer engine', () => {
     buf.set(data, 0); buf.set(imgBytes, data.length); buf.set(tail, data.length + imgBytes.length)
     const ops = tokenizeContent(buf)
     const opNames = ops.map((o) => o.op)
-    assert.ok(opNames.includes('ID'), `ops: ${opNames}`)
-    assert.ok(opNames.includes('EI'))
+    const bi = ops.find((o) => o.op === 'BI')
+    assert.ok(bi, `ops: ${opNames}`)
+    assert.deepEqual([...bi.data], [...imgBytes], 'inline payload captured exactly')
+    assert.equal(bi.dict.get('W'), 2)
     const tj = ops.find((o) => o.op === 'Tj')
     assert.ok(tj, 'Tj after inline image must survive')
   })
@@ -927,7 +925,7 @@ describe('pageText', () => {
     for (let n = 1; n < 6; n++) xref += String(offs.get(n)).padStart(10, '0') + ' 00000 n \r\n'
     const doc = await parsePdf(enc(head + body + xref +
       `trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xrefAt}\n%%EOF\n`))
-    const { pageText } = await import('../src/pdf/ops.js')
+    const { pageText } = await import('../src/pdf/content.js')
     const text = await pageText(doc, pageLeaves(doc)[0])
     assert.equal(text, 'First line\nSecond line')
   })
@@ -951,7 +949,8 @@ describe('compressPdf', () => {
     for (let n = 1; n < 6; n++) xref += String(offs.get(n)).padStart(10, '0') + ' 00000 n \r\n'
     const src = enc(head + body + xref +
       `trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xrefAt}\n%%EOF\n`)
-    const { compressPdf, pageText } = await import('../src/pdf/ops.js')
+    const { compressPdf } = await import('../src/pdf/ops.js')
+    const { pageText } = await import('../src/pdf/content.js')
     const { bytes, before, after } = await compressPdf(src)
     assert.ok(after < before, `compressed ${before} → ${after}`)
     const re = await parsePdf(bytes)
@@ -1030,7 +1029,7 @@ describe('review fixes', () => {
     const t = ops.find((o) => o.t === 'text')
     assert.equal(t.inv, true, 'invisible text flagged for painter skip')
     assert.equal(t.str, 'HIDDEN OCR')
-    const { pageText } = await import('../src/pdf/ops.js')
+    const { pageText } = await import('../src/pdf/content.js')
     assert.equal(await pageText(doc, leaf), 'HIDDEN OCR', 'OCR layer still extracts')
   })
 
@@ -1230,7 +1229,7 @@ describe('review fixes', () => {
     const unlocked = await decryptPdf(locked, 'sparse')
     const doc = await parsePdf(unlocked)
     const leaf = pageLeaves(doc)[0]
-    const { streamData } = await import('../src/pdf/ops.js')
+    const { streamData } = await import('../src/pdf/content.js')
     const cs = deref(doc, get(leaf.dict, 'Contents'))
     const plain = dec(await streamData(cs))
     assert.ok(plain.includes('SECRETS'), `decrypted content: ${JSON.stringify(plain.slice(0, 80))}`)

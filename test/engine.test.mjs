@@ -9,7 +9,8 @@ import { decodeImage } from '../src/pdf/image.js'
 import { compileFunction } from '../src/pdf/functions.js'
 import { parsePdf } from '../src/pdf/parse.js'
 import { enc, name } from '../src/pdf/types.js'
-import { extractText, pageLeaves, textFromOps } from '../src/pdf/ops.js'
+import { extractText, pageLeaves } from '../src/pdf/ops.js'
+import { textFromOps } from '../src/pdf/content.js'
 import { decryptPdf, permBits, protectPdf } from '../src/pdf/security.js'
 
 const u8 = (s) => new Uint8Array(Buffer.from(s, 'latin1'))

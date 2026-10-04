@@ -1,7 +1,8 @@
 import { h, icon, readBytes, saveBlob, setKids } from '../ui/dom.js'
 import { Btn, Card, DropZone, ErrorText } from '../ui/widgets.js'
 import { parsePdf } from '../pdf/parse.js'
-import { collectDrawOps, pageLeaves } from '../pdf/ops.js'
+import { pageLeaves } from '../pdf/ops.js'
+import { collectDrawOps } from '../pdf/content.js'
 import { renderPage } from '../pdf/render.js'
 import { zipStore } from '../zip.js'
 
