@@ -427,75 +427,137 @@ export function parseRanges(spec, maxPage) {
 export function jpegInfo(buf) {
   if (buf[0] !== 0xff || buf[1] !== 0xd8) throw new Error('not a JPEG')
   let i = 2
+  let orientation = 1
+  let adobe = false
   while (i + 3 < buf.length) {
     if (buf[i] !== 0xff) { i++; continue }
     const marker = buf[i + 1]
     if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) { i += 2; continue }
     const len = (buf[i + 2] << 8) | buf[i + 3]
     if (marker === 0xda) break // SOS — image data
+    if (marker === 0xe1 && buf[i + 4] === 0x45 && buf[i + 5] === 0x78 && buf[i + 6] === 0x69 && buf[i + 7] === 0x66) {
+      orientation = exifOrientation(buf, i + 10, i + 2 + len) || 1
+    }
+    if (marker === 0xee && buf[i + 4] === 0x41 && buf[i + 5] === 0x64 && buf[i + 6] === 0x6f && buf[i + 7] === 0x62 && buf[i + 8] === 0x65) adobe = true
     if ([0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf].includes(marker)) {
       const height = (buf[i + 5] << 8) | buf[i + 6]
       const width = (buf[i + 7] << 8) | buf[i + 8]
       const comps = buf[i + 9]
       const cs = comps === 1 ? 'DeviceGray' : comps === 4 ? 'DeviceCMYK' : 'DeviceRGB'
-      return { width, height, colorSpace: cs }
+      return { width, height, colorSpace: cs, orientation, adobe }
     }
     i += 2 + len
   }
   throw new Error('JPEG SOF marker not found')
 }
 
-/** Pack JPEG images into a PDF — one image per page at native size. */
-const PAGE_SIZES = { a4: [595.28, 841.89], letter: [612, 792] }
+/** EXIF IFD0 orientation tag (0x0112) from a TIFF block at [t, end). */
+function exifOrientation(buf, t, end) {
+  const le = buf[t] === 0x49
+  const u16 = (o) => (le ? buf[o] | (buf[o + 1] << 8) : (buf[o] << 8) | buf[o + 1])
+  const u32 = (o) => (le ? (buf[o] | (buf[o + 1] << 8) | (buf[o + 2] << 16) | (buf[o + 3] << 24)) >>> 0 : ((buf[o] << 24) | (buf[o + 1] << 16) | (buf[o + 2] << 8) | buf[o + 3]) >>> 0)
+  const ifd = t + u32(t + 4)
+  if (ifd + 2 > end) return 1
+  const n = u16(ifd)
+  for (let k = 0; k < n; k++) {
+    const e = ifd + 2 + k * 12
+    if (e + 12 > end) break
+    if (u16(e) === 0x0112) return u16(e + 8)
+  }
+  return 1
+}
+
+/** EXIF orientation → clockwise rotation in degrees (mirrored variants approximated). */
+export const exifRotation = (o) => ({ 3: 180, 4: 180, 5: 90, 6: 90, 7: 270, 8: 270 })[o] ?? 0
+
+export const PAGE_SIZES = { a4: [595.28, 841.89], letter: [612, 792], legal: [612, 1008], a3: [841.89, 1190.55], a5: [419.53, 595.28] }
 
 /**
- * Wrap jpeg images into a one-page-each PDF.
- * opts: size 'native'|'a4'|'letter', orient 'auto'|'portrait'|'landscape',
- *       margin (pt), fit 'contain'|'stretch'.
+ * Images → PDF, one image per page.
+ * images: [{data|jpeg: Uint8Array (JPEG)} | {rgba, width, height}] + optional rotate (deg, clockwise).
+ *   JPEGs are embedded losslessly; their EXIF orientation is honoured.
+ *   RGBA images keep transparency (soft mask).
+ * opts: size 'fit' (page = image at `dpi`) | 'a4' | 'letter' | 'legal' | 'a3' | 'a5'
+ *       ('native' = legacy 1px→1pt), orient 'auto'|'portrait'|'landscape', margin (pt),
+ *       fit 'contain'|'cover'|'stretch', dpi (default 96).
  */
-export function imagesToPdf(images, opts = {}) {
-  const { size = 'native', orient = 'auto', margin = 0, fit = 'contain' } = opts
+export async function imagesToPdf(images, opts = {}) {
+  const { size = 'fit', orient = 'auto', margin = 0, fit = 'contain', dpi = 96 } = opts
   const dst = newDoc()
   const pagesRef = dst.alloc()
   const kids = []
   for (const img of images) {
-    const { width, height, colorSpace } = jpegInfo(img.data)
-    const imgNum = dst.alloc()
-    dst.set(imgNum, stream(new Map([
-      ['Type', name('XObject')],
-      ['Subtype', name('Image')],
-      ['Width', width],
-      ['Height', height],
-      ['ColorSpace', name(colorSpace)],
-      ['BitsPerComponent', 8],
-      ['Filter', name('DCTDecode')],
-      ['Length', img.data.length],
-    ]), img.data))
-
-    let pw, ph
-    if (size === 'native') {
-      pw = width + margin * 2
-      ph = height + margin * 2
+    let width, height, imgDict, imgData, rot = ((img.rotate ?? 0) % 360 + 360) % 360
+    const jpeg = img.jpeg ?? img.data
+    if (jpeg) {
+      const info = jpegInfo(jpeg)
+      width = info.width
+      height = info.height
+      rot = (rot + exifRotation(info.orientation)) % 360
+      imgDict = new Map([
+        ['Type', name('XObject')], ['Subtype', name('Image')], ['Width', width], ['Height', height],
+        ['ColorSpace', name(info.colorSpace)], ['BitsPerComponent', 8], ['Filter', name('DCTDecode')],
+      ])
+      if (info.colorSpace === 'DeviceCMYK' && info.adobe) imgDict.set('Decode', [1, 0, 1, 0, 1, 0, 1, 0])
+      imgData = jpeg
     } else {
-      let [bw, bh] = PAGE_SIZES[size] ?? PAGE_SIZES.a4
-      const landscape = orient === 'landscape' || (orient === 'auto' && width > height)
+      width = img.width
+      height = img.height
+      const n = width * height
+      const rgb = new Uint8Array(n * 3)
+      const alpha = new Uint8Array(n)
+      let hasAlpha = false
+      for (let k = 0, j = 0; k < n; k++, j += 4) {
+        rgb[k * 3] = img.rgba[j]; rgb[k * 3 + 1] = img.rgba[j + 1]; rgb[k * 3 + 2] = img.rgba[j + 2]
+        alpha[k] = img.rgba[j + 3]
+        if (img.rgba[j + 3] !== 255) hasAlpha = true
+      }
+      imgDict = new Map([
+        ['Type', name('XObject')], ['Subtype', name('Image')], ['Width', width], ['Height', height],
+        ['ColorSpace', name('DeviceRGB')], ['BitsPerComponent', 8], ['Filter', name('FlateDecode')],
+      ])
+      if (hasAlpha) {
+        const sm = dst.alloc()
+        dst.set(sm, stream(new Map([
+          ['Type', name('XObject')], ['Subtype', name('Image')], ['Width', width], ['Height', height],
+          ['ColorSpace', name('DeviceGray')], ['BitsPerComponent', 8], ['Filter', name('FlateDecode')],
+        ]), await deflate(alpha)))
+        imgDict.set('SMask', ref(sm, 0))
+      }
+      imgData = await deflate(rgb)
+    }
+    const imgNum = dst.alloc()
+    dst.set(imgNum, stream(imgDict, imgData))
+    // displayed (post-rotation) image size
+    const swap = rot % 180 !== 0
+    const vw = swap ? height : width, vh = swap ? width : height
+    let pw, ph
+    if (size === 'native' || size === 'fit') {
+      const k = size === 'native' ? 1 : 72 / (dpi || 96)
+      pw = vw * k + margin * 2
+      ph = vh * k + margin * 2
+    } else {
+      const [bw, bh] = PAGE_SIZES[size] ?? PAGE_SIZES.a4
+      const landscape = orient === 'landscape' || (orient === 'auto' && vw > vh)
       ;[pw, ph] = landscape ? [Math.max(bw, bh), Math.min(bw, bh)] : [Math.min(bw, bh), Math.max(bw, bh)]
     }
-    const cw = Math.max(1, pw - margin * 2)
-    const ch = Math.max(1, ph - margin * 2)
+    const cw = Math.max(1, pw - margin * 2), ch = Math.max(1, ph - margin * 2)
     let dw, dh
     if (fit === 'stretch') { dw = cw; dh = ch }
-    else { const s = Math.min(cw / width, ch / height); dw = width * s; dh = height * s }
-    const x = (pw - dw) / 2
-    const y = (ph - dh) / 2
-
+    else { const sc = fit === 'cover' ? Math.max(cw / vw, ch / vh) : Math.min(cw / vw, ch / vh); dw = vw * sc; dh = vh * sc }
+    const x = (pw - dw) / 2, y = (ph - dh) / 2
+    // unit square → displayed box, rotated clockwise by `rot`
+    const f = (v) => +v.toFixed(3)
+    const m = rot === 90 ? [0, -dh, dw, 0, x, y + dh]
+      : rot === 180 ? [-dw, 0, 0, -dh, x + dw, y + dh]
+      : rot === 270 ? [0, dh, -dw, 0, x + dw, y]
+      : [dw, 0, 0, dh, x, y]
+    const clip = fit === 'cover' ? `${f(margin)} ${f(margin)} ${f(cw)} ${f(ch)} re W n ` : ''
     const csNum = dst.alloc()
-    dst.set(csNum, stream(new Map(), new TextEncoder().encode(`q ${dw.toFixed(2)} 0 0 ${dh.toFixed(2)} ${x.toFixed(2)} ${y.toFixed(2)} cm /Im0 Do Q`)))
+    dst.set(csNum, stream(new Map(), new TextEncoder().encode(`q ${clip}${m.map(f).join(' ')} cm /Im0 Do Q`)))
     const pageNum = dst.alloc()
     dst.set(pageNum, new Map([
-      ['Type', name('Page')],
-      ['Parent', ref(pagesRef, 0)],
-      ['MediaBox', [0, 0, pw, ph]],
+      ['Type', name('Page')], ['Parent', ref(pagesRef, 0)], ['MediaBox', [0, 0, f(pw), f(ph)]],
       ['Resources', new Map([['XObject', new Map([['Im0', ref(imgNum, 0)]])]])],
       ['Contents', ref(csNum, 0)],
     ]))
@@ -560,35 +622,53 @@ export async function extractText(doc) {
 // ---------- compress ----------
 
 /**
- * Rebuild keeping only reachable objects; re-deflate every decodable stream
- * when it wins. opts.reimage: async (stream, decodedBytes) → Uint8Array|null —
- * browser hook to re-encode DCT images at lower quality (canvas path).
- * Returns { bytes, before, after }.
+ * Rebuild keeping only reachable objects, re-deflate every stream that gets
+ * smaller, merge byte-identical streams (fonts/images repeated across merged
+ * files), optionally strip metadata + page thumbnails, and — through the
+ * browser hook — re-encode/downscale photos.
+ * opts.reimage(decoded, {w, h}) → Promise<Uint8Array JPEG | null>
+ * opts.stripMeta: drop /Info + XMP; opts.stripThumbs (default true): drop page /Thumb images.
+ * Returns { bytes, before, after, images: {total, recoded} }.
  */
-export async function compressPdf(bytes, { reimage } = {}) {
+export async function compressPdf(bytes, { reimage, stripMeta = false, stripThumbs = true } = {}) {
   const src = await parsePdf(bytes)
   const leaves = pageLeaves(src)
+  if (stripThumbs) for (const leaf of leaves) { leaf.dict.delete('Thumb'); leaf.dict.delete('PieceInfo') }
   const dst = newDoc()
   const pagesRef = dst.alloc()
   const kids = []
   const refMap = new Map()
   appendPages(src, leaves.map((leaf) => ({ leaf, rotateDelta: 0 })), dst, pagesRef, kids, [], refMap)
-  // pull catalog extras in now so recompression covers them too
-  const { catNum, trailer } = buildCatalog(dst, pagesRef, kids, src, refMap)
-  const dstDoc = { objects: new Map() }
+  const { catNum, trailer } = buildCatalog(dst, pagesRef, kids, src, refMap, stripMeta ? { skip: ['Metadata'], noInfo: true } : {})
+  const dstDoc = { objects: new Map(), trailer: new Map() }
   for (const [num, v] of dst.objects) dstDoc.objects.set(`${num} 0`, { v })
+  // soft masks are alpha channels — never JPEG them (halos), and skip stencils
+  const smaskNums = new Set()
   for (const v of dst.objects.values()) {
+    if (isStream(v)) { const sm = get(v.dict, 'SMask'); if (isRef(sm)) smaskNums.add(sm.n) }
+  }
+  const stats = { total: 0, recoded: 0 }
+  for (const [num, v] of dst.objects) {
     if (!isStream(v)) continue
-    if (reimage && get(v.dict, 'Subtype')?.v === 'Image' && get(v.dict, 'SMask') === undefined) {
-      const dec = await decodeImageStream(dstDoc, v).catch(() => null)
-      const repl = dec ? await reimage(dec).catch(() => null) : null
-      if (repl && repl.length < v.data.length) {
-        v.data = repl
-        v.dict.set('Filter', name('DCTDecode'))
-        v.dict.set('ColorSpace', name('DeviceRGB'))
-        v.dict.set('BitsPerComponent', 8)
-        for (const k of ['DecodeParms', 'DP', 'Decode']) v.dict.delete(k)
-        continue
+    const isImage = get(v.dict, 'Subtype')?.v === 'Image'
+    if (isImage && !smaskNums.has(num) && get(v.dict, 'ImageMask') !== true) {
+      stats.total++
+      const bpc = get(v.dict, 'BitsPerComponent') ?? 8
+      if (reimage && bpc >= 8) {
+        const dec = await decodeImageStream(dstDoc, v).catch(() => null)
+        const repl = dec ? await reimage(dec, { w: get(v.dict, 'Width'), h: get(v.dict, 'Height') }).catch(() => null) : null
+        if (repl && repl.length < v.data.length * 0.95) {
+          const info = jpegInfo(repl)
+          v.data = repl
+          v.dict.set('Filter', name('DCTDecode'))
+          v.dict.set('ColorSpace', name(info.colorSpace))
+          v.dict.set('BitsPerComponent', 8)
+          v.dict.set('Width', info.width) // the hook may have downscaled (any SMask still maps 1:1 onto the unit square)
+          v.dict.set('Height', info.height)
+          for (const k of ['DecodeParms', 'DP', 'Decode', 'Mask']) v.dict.delete(k)
+          stats.recoded++
+          continue
+        }
       }
     }
     // streamData undoes the whole chain incl. predictors, so the re-deflated
@@ -603,9 +683,35 @@ export async function compressPdf(bytes, { reimage } = {}) {
       v.dict.delete('DP')
     }
   }
+  dedupeStreams(dst)
   const out = writeDoc(dst, catNum, trailer)
-  return { bytes: out, before: bytes.length, after: out.length }
+  return { bytes: out, before: bytes.length, after: out.length, images: stats }
 }
+
+/** Merge byte-identical stream objects and repoint every reference to the survivor. */
+function dedupeStreams(dst) {
+  const seen = new Map() // key → num
+  const remap = new Map() // dup num → keeper num
+  for (const [num, v] of dst.objects) {
+    if (!isStream(v) || v.data.length < 64) continue
+    const dictKey = [...v.dict].filter(([k]) => k !== 'Length').map(([k, x]) => `${k}=${JSON.stringify(x, (_, y) => (y instanceof Uint8Array ? [...y] : y instanceof Map ? [...y] : y))}`).sort().join('|')
+    const key = `${crc32(v.data)}:${v.data.length}:${dictKey}`
+    const prev = seen.get(key)
+    if (prev !== undefined && bytesEqual(dst.objects.get(prev).data, v.data)) remap.set(num, prev)
+    else seen.set(key, num)
+  }
+  if (!remap.size) return
+  const fix = (x) => {
+    if (isRef(x)) return remap.has(x.n) ? ref(remap.get(x.n), 0) : x
+    if (x instanceof Map) { for (const [k, y] of x) x.set(k, fix(y)); return x }
+    if (Array.isArray(x)) { for (let i = 0; i < x.length; i++) x[i] = fix(x[i]); return x }
+    if (isStream(x)) { fix(x.dict); return x }
+    return x
+  }
+  for (const v of dst.objects.values()) fix(v)
+  for (const n of remap.keys()) dst.objects.delete(n)
+}
+const bytesEqual = (a, b) => { if (a.length !== b.length) return false; for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false; return true }
 
 /**
  * Best-effort visual for a page when rendering fails: {img: {data, mime} | null, text}.

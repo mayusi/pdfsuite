@@ -207,11 +207,25 @@ describe('imagesToPdf', () => {
   }
 
   it('reads jpeg dimensions', () => {
-    assert.deepEqual(jpegInfo(fakeJpeg(640, 480)), { width: 640, height: 480, colorSpace: 'DeviceRGB' })
+    assert.deepEqual(jpegInfo(fakeJpeg(640, 480)), { width: 640, height: 480, colorSpace: 'DeviceRGB', orientation: 1, adobe: false })
+  })
+
+  it('honours EXIF orientation (phone photos) without re-encoding', async () => {
+    // fakeJpeg + an APP1 Exif block (big-endian TIFF, IFD0 with Orientation = 6 → 90° CW)
+    const base = fakeJpeg(640, 480)
+    const tiff = [0x4d, 0x4d, 0, 42, 0, 0, 0, 8, 0, 1, 0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, 6, 0, 0, 0, 0, 0, 0, 0, 0]
+    const body = [0x45, 0x78, 0x69, 0x66, 0, 0, ...tiff]
+    const app1 = [0xff, 0xe1, ((body.length + 2) >> 8) & 255, (body.length + 2) & 255, ...body]
+    const jpg = new Uint8Array([...base.slice(0, 2), ...app1, ...base.slice(2)])
+    assert.equal(jpegInfo(jpg).orientation, 6)
+    const doc = await parsePdf(await imagesToPdf([{ data: jpg }], { size: 'fit', dpi: 72 }))
+    const leaf = pageLeaves(doc)[0]
+    assert.deepEqual(get(leaf.dict, 'MediaBox'), [0, 0, 480, 640], 'portrait page for a rotated photo')
+    assert.deepEqual([...deref(doc, get(get(get(leaf.dict, 'Resources'), 'XObject'), 'Im0')).data], [...jpg], 'JPEG bytes embedded untouched')
   })
 
   it('wraps jpegs into one-page-each pdfs', async () => {
-    const out = imagesToPdf([{ data: fakeJpeg(640, 480) }, { data: fakeJpeg(320, 240) }])
+    const out = await imagesToPdf([{ data: fakeJpeg(640, 480) }, { data: fakeJpeg(320, 240) }], { size: 'native' })
     const doc = await parsePdf(out)
     const leaves = pageLeaves(doc)
     assert.equal(leaves.length, 2)
@@ -788,7 +802,7 @@ describe('powerup engine', () => {
 
   it('imagesToPdf honours a4/landscape/margin options', async () => {
     const fake = new Uint8Array([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x02, 0x58, 0x03, 0x20, 0x03, 0xff, 0xda])
-    const out = imagesToPdf([{ data: fake }], { size: 'a4', orient: 'auto', margin: 18 })
+    const out = await imagesToPdf([{ data: fake }], { size: 'a4', orient: 'auto', margin: 18 })
     const doc = await parsePdf(out)
     const leaf = pageLeaves(doc)[0]
     const mb = get(leaf.dict, 'MediaBox')

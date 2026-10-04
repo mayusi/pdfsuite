@@ -1,138 +1,89 @@
-import { h, setKids, readBytes, saveBlob } from '../ui/dom.js'
-import { Btn, Card, DropZone, ErrorText } from '../ui/widgets.js'
-import { pageCount } from '../pdf/ops.js'
+import { h, stem } from '../ui/dom.js'
+import { Button, Dropzone, Field, Seg, Select, Stepper, Switch, Swatches, TextInput, FileChip, pickFiles, toast } from '../ui/kit.js'
+import { ToolHead, Workspace, ResultCard, openPdf, runTask, takeHandoff, mount, docMeta } from '../ui/tool.js'
+import { livePreview } from '../ui/preview.js'
 import { addPageNumbers } from '../pdf/stamp.js'
 
-const POSITIONS = [
-  ['bc', 'Bottom center'], ['bl', 'Bottom left'], ['br', 'Bottom right'],
-  ['tc', 'Top center'], ['tl', 'Top left'], ['tr', 'Top right'],
-]
-const FORMATS = [
-  ['n-of-total', '1 / 12'], ['n', '1'], ['page-n', 'Page 1'], ['custom', 'Custom…'],
-]
+const POSITIONS = [['tl', 'Top left'], ['tc', 'Top centre'], ['tr', 'Top right'], ['bl', 'Bottom left'], ['bc', 'Bottom centre'], ['br', 'Bottom right']]
+const FORMATS = [['n', '1'], ['n-of-total', '1 / 9'], ['page-n', 'Page 1'], ['page-n-of-total', 'Page 1 of 9'], ['custom', 'Custom']]
 
 export function PageNums() {
-  let file = null
-  let bytes = null
-  let pages = 0
-  let pos = 'bc'
-  let fmt = 'n-of-total'
-  let fmtStr = '{n} / {t}'
-  let start = 1
-  let size = 10
-  let margin = 18
-  let skipFirst = false
+  const { root, render } = mount()
+  let info = null
+  const o = { pos: 'bc', fmt: 'n', fmtStr: '- {n} -', start: 1, size: 11, margin: 24, font: 'helv', bold: false, color: '#000000', skipFirst: false, mirror: false, pages: 'all' }
   let busy = false
-  let error = ''
-  let loadGen = 0
-  let previewEl = null
-  const root = h('div', { class: 'tool' })
+  let result = null
+  let pv = null
 
   const load = async ([f]) => {
-    const my = ++loadGen
-    error = ''
-    file = f
-    pages = 0
-    render()
     try {
-      const b = await readBytes(f)
-      if (my !== loadGen) return
-      const count = await pageCount(b)
-      if (my !== loadGen) return
-      bytes = b
-      pages = count
-    } catch (e) {
-      if (my !== loadGen) return
-      error = e.message || 'could not read that PDF'
-      file = null
-      bytes = null
+      const i = await openPdf(f)
+      if (!i) return
+      info = i
+      result = null
+      paint()
+    } catch (e) { toast(e.message, { type: 'error' }) }
+  }
+  const opts = (extra = {}) => ({ ...o, ...extra })
+  const set = (k, v, repaint = false) => { o[k] = v; if (repaint) paint(); else pv?.update() }
+
+  const run = () => runTask((b) => { busy = b; paint() }, async () => {
+    const out = await addPageNumbers(info.bytes, opts())
+    result = { blob: new Blob([out], { type: 'application/pdf' }), name: `${stem(info.name)}-numbered.pdf` }
+  })
+
+  function posPicker() {
+    const grid = h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '6px', padding: '8px', background: 'var(--surface-3)', borderRadius: '10px', aspectRatio: '1.3' } })
+    for (const [v, label] of POSITIONS) {
+      const row = v[0] === 't' ? 1 : 3
+      const col = { l: 1, c: 2, r: 3 }[v[1]]
+      grid.append(h('button', {
+        type: 'button', 'aria-label': label, 'data-tip': label,
+        style: { gridRow: String(row), gridColumn: String(col), border: '0', borderRadius: '7px', cursor: 'pointer', background: o.pos === v ? 'var(--accent)' : 'var(--surface)', color: o.pos === v ? 'var(--on-accent)' : 'var(--text-3)', fontSize: '12px', fontWeight: '700', boxShadow: 'var(--shadow-sm)' },
+        onclick: () => set('pos', v, true),
+      }, '1'))
     }
-    render()
+    grid.append(h('div', { style: { gridRow: '2', gridColumn: '1 / 4' } }))
+    return grid
   }
 
-  const run = async () => {
-    busy = true
-    error = ''
-    render()
-    try {
-      const out = await addPageNumbers(bytes, { pos, fmt, fmtStr, start, size, margin, skipFirst })
-      saveBlob(new Blob([out], { type: 'application/pdf' }), `${file.name.replace(/\.pdf$/i, '')}-numbered.pdf`)
-    } catch (e) {
-      error = e.message || 'failed'
-    } finally {
-      busy = false
-      render()
-    }
-  }
-
-  const select = (options, value, onpick) =>
-    h('select', {
-      class: 'textin sel',
-      onchange: (e) => { onpick(e.target.value); render() },
-    }, options.map(([v, label]) =>
-      h('option', { value: v, selected: v === value || undefined }, label)))
-
-  const numin = (value, min, max, onset) =>
-    h('input', {
-      class: 'textin num', type: 'number', value, min, max,
-      onchange: (e) => { onset(Math.max(min, Math.min(max, parseInt(e.target.value, 10) || min))) },
-    })
-
-  const previewLabel = () => {
-    const n = (skipFirst ? 1 : 0) + start
-    const shown = fmt === 'n' ? `${n}`
-      : fmt === 'page-n' ? `Page ${n}`
-      : fmt === 'custom' ? (fmtStr || '{n}').replaceAll('{n}', String(n)).replaceAll('{t}', String(pages))
-      : `${n} / ${pages}`
-    const where = POSITIONS.find(([v]) => v === pos)[1].toLowerCase()
-    return `Preview: "${shown}" · ${where} · ${size}pt · ${margin}pt margin${skipFirst ? ' · page 1 left blank' : ''}`
-  }
-
-  function render() {
-    setKids(root,
-      DropZone({ accept: 'application/pdf', onFiles: load }),
-      file
-        ? Card(
-            h('p', { class: 'meta' }, h('b', {}, file.name), ` — ${pages} pages`),
-            h('div', { class: 'optrow' },
-              h('div', {}, h('label', { class: 'lbl' }, 'Position'), select(POSITIONS, pos, (v) => (pos = v))),
-              h('div', {}, h('label', { class: 'lbl' }, 'Format'), select(FORMATS, fmt, (v) => (fmt = v))),
-              h('div', {}, h('label', { class: 'lbl' }, 'Start at'), numin(start, 0, 9999, (v) => (start = v))),
-              h('div', {}, h('label', { class: 'lbl' }, 'Size (pt)'), numin(size, 6, 48, (v) => (size = v))),
-            ),
-            fmt === 'custom'
-              ? h('div', { class: 'optrow' },
-                  h('div', { style: { flex: 1 } },
-                    h('label', { class: 'lbl' }, 'Custom label — {n} = number, {t} = total'),
-                    h('input', { class: 'textin', value: fmtStr, oninput: (e) => {
-                      fmtStr = e.target.value
-                      if (previewEl) previewEl.textContent = previewLabel()
-                    } })),
-                )
-              : null,
-            h('div', { class: 'optrow' },
-              h('div', { style: { flex: 1 } },
-                h('label', { class: 'lbl' }, `Margin — ${margin}pt`),
-                h('input', {
-                  type: 'range', min: 0, max: 72, step: 1, value: margin, class: 'slider',
-                  oninput: (e) => {
-                    margin = +e.target.value
-                    e.target.previousElementSibling.textContent = `Margin — ${margin}pt`
-                    if (previewEl) previewEl.textContent = previewLabel()
-                  },
-                })),
-            ),
-            h('label', { class: 'radio', style: { marginBottom: '10px' } },
-              h('input', { type: 'checkbox', checked: skipFirst || undefined, onchange: (e) => { skipFirst = e.target.checked; render() } }),
-              'Skip first page (covers/title pages stay clean)',
-            ),
-            (previewEl = h('p', { class: 'meta dim' }, previewLabel())),
-          )
-        : null,
-      ErrorText(error),
-      file ? Btn(busy ? 'Stamping…' : 'Add page numbers', { onclick: run, disabled: busy || !bytes }) : null,
+  function paint() {
+    if (!info) { render(ToolHead('pagenum'), Dropzone({ onFiles: load, title: 'Drop a PDF to number its pages', tc: 'var(--c-edit)', icon: 'hash' })); return }
+    if (result) { render(ToolHead('pagenum'), ResultCard({ title: 'Page numbers added', blob: result.blob, filename: result.name, toolId: 'pagenum', onAgain: () => { result = null; paint() } })); return }
+    const n = info.leaves.length
+    const previewPages = n > 1 ? [o.skipFirst && n > 2 ? 1 : 0, o.skipFirst && n > 2 ? 2 : 1] : [0]
+    pv = livePreview(info, previewPages, (bytes) => addPageNumbers(bytes, opts({ total: n, offset: previewPages[0] })))
+    render(
+      ToolHead('pagenum'),
+      Workspace(
+        [
+          FileChip({ name: info.name, size: info.size, meta: docMeta(info), onReplace: async () => { const [f] = await pickFiles(); if (f) load([f]) } }),
+          h('div', { class: 'card card-pad' }, h('div', { class: 'card-title' }, 'Live preview'), pv.el),
+        ],
+        [
+          h('div', { class: 'card stack' },
+            Field('Position', posPicker()),
+            Field('Format', Seg(FORMATS, o.fmt, (v) => set('fmt', v, true), { block: true })),
+            o.fmt === 'custom' ? Field('Custom text', TextInput(o.fmtStr, (v) => set('fmtStr', v), { placeholder: 'e.g. Page {n} of {t}' }), { hint: '{n} number · {t} total' }) : null,
+            h('div', { class: 'field-row' },
+              Field('Start at', Stepper(o.start, { min: 0, max: 99999 }, (v) => set('start', v))),
+              Field('Size', Stepper(o.size, { min: 5, max: 72 }, (v) => set('size', v)), { hint: 'pt' })),
+            h('div', { class: 'field-row' },
+              Field('Font', Select([['helv', 'Helvetica'], ['times', 'Times'], ['courier', 'Courier']], o.font, (v) => set('font', v))),
+              Field('Margin', Stepper(o.margin, { min: 0, max: 200, step: 2 }, (v) => set('margin', v)), { hint: 'pt' })),
+            Field('Colour', Swatches(o.color, (v) => set('color', v), { colors: ['#000000', '#555555', '#1971c2', '#e03131', '#2f9e44'] })),
+            Field('Pages', Seg([['all', 'All'], ['odd', 'Odd'], ['even', 'Even']], o.pages, (v) => set('pages', v), { block: true })),
+            Switch('Bold', o.bold, (v) => set('bold', v)),
+            Switch('Skip the first page', o.skipFirst, (v) => set('skipFirst', v, true), { hint: 'Cover pages stay clean; numbering starts on page 2' }),
+            Switch('Mirror for printing', o.mirror, (v) => set('mirror', v), { hint: 'Left/right positions swap on even pages (book style)' })),
+          h('div', { class: 'action-bar sticky-m' },
+            Button({ label: busy ? 'Numbering…' : 'Add page numbers', icon: 'hash', variant: 'primary', size: 'lg', block: true, busy, onClick: run })),
+        ]),
     )
   }
-  render()
+
+  const ho = takeHandoff()
+  if (ho) load([Array.isArray(ho) ? ho[0] : ho])
+  else paint()
   return root
 }

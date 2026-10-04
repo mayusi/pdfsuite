@@ -70,7 +70,7 @@ const rgb = (c, fallback = '#000') => (c ? `rgb(${Math.round(c[0] * 255)},${Math
  * Paint draw ops onto ctx. scale = device px per pt. Returns nothing.
  * opts.skipText: leave text out (the editor's text-edit mode paints its own).
  */
-export async function paintOps(ctx, doc, ops, scale, cache = new Map(), { hide = null } = {}) {
+export async function paintOps(ctx, doc, ops, scale, cache = new Map(), { hide = null, hideGlyph = null } = {}) {
   let saves = 0
   const base = () => ctx.setTransform(scale, 0, 0, scale, 0, 0)
   const trace = (segs) => {
@@ -172,6 +172,12 @@ export async function paintOps(ctx, doc, ops, scale, cache = new Map(), { hide =
       for (let i = 0; i < gx.length; i += 2) {
         const ch = gx[i + 1]
         if (!ch || ch === ' ') continue
+        if (hideGlyph) { // editor: glyphs under an "edit text" region aren't painted
+          const adv = i + 2 < gx.length ? gx[i + 2] - gx[i] : op.fs * 0.5
+          const cx = m[0] * (gx[i] + adv / 2) + m[2] * op.fs * 0.32 + m[4]
+          const cy = m[1] * (gx[i] + adv / 2) + m[3] * op.fs * 0.32 + m[5]
+          if (hideGlyph(cx, cy)) continue
+        }
         const x = (gx[i] / th) * q
         if (fill) { ctx.globalAlpha = op.a ?? 1; ctx.fillText(ch, x, 0) }
         if (stroke) { ctx.globalAlpha = op.sa ?? 1; ctx.strokeText(ch, x, 0) }

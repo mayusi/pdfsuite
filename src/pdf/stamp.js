@@ -214,9 +214,12 @@ export async function addPageNumbers(bytes, opts = {}) {
   const {
     pos = 'bc', fmt: style = 'n-of-total', fmtStr = '{n}', start = 1, skipFirst = false, size = 10,
     margin = 18, font = 'helv', bold = false, color = '#000000', mirror = false, pages: sel = 'all',
+    total: totalOverride = null, offset = 0, // preview support: real total + index of the first page given
   } = opts
   const base = stdFont(font, bold)
-  const label = (i, total) => {
+  const label = (i0, total0) => {
+    const i = i0 + offset
+    const total = totalOverride ?? total0
     const n = i + start - (skipFirst ? 1 : 0)
     const t = total - (skipFirst ? 1 : 0) + start - 1
     if (style === 'custom') return (fmtStr || '{n}').replaceAll('{n}', String(n)).replaceAll('{t}', String(t))
@@ -228,12 +231,13 @@ export async function addPageNumbers(bytes, opts = {}) {
   const col = rgbOp(color) ?? '0 0 0'
   let wanted = null
   return stampPages(bytes, ({ i, total, mb, rot, w, hh, dw, dh }) => {
-    wanted ??= new Set(selectPages(sel, total))
-    if ((i === 0 && skipFirst) || !wanted.has(i)) return null
+    wanted ??= new Set(selectPages(sel, totalOverride ?? total))
+    const gi = i + offset // index in the real document
+    if ((gi === 0 && skipFirst) || !wanted.has(gi)) return null
     const s = label(i, total)
     const tw = textWidth(base, s, size)
     let side = pos[1]
-    if (mirror && i % 2 === 1 && side !== 'c') side = side === 'l' ? 'r' : 'l'
+    if (mirror && gi % 2 === 1 && side !== 'c') side = side === 'l' ? 'r' : 'l'
     const xd = side === 'l' ? margin : side === 'r' ? dw - margin - tw : dw / 2 - tw / 2
     const yd = pos[0] === 't' ? dh - margin - size * 0.72 : margin
     const [xu, yu, m] = stampPos(rot, xd, yd, w, hh)
@@ -525,4 +529,26 @@ export async function annotatePdf(bytes, pagesAnnots) {
     // leading \n keeps our first op from fusing with the previous stream's last token
     return ops.length || annots.length ? { content: ops.length ? '\n' + ops.join('\n') + '\n' : '', res, annots } : null
   })
+}
+
+/**
+ * Replace the document info (Title, Author, Subject, Keywords, Creator, Producer).
+ * fields: {Title?, Author?, …} — empty strings remove a key. The XMP packet is
+ * dropped so readers that prefer XMP don't show the stale values.
+ */
+export async function setMetadata(bytes, fields) {
+  const doc = await parsePdf(bytes)
+  const old = deref(doc, get(doc.trailer, 'Info'))
+  const info = old instanceof Map ? new Map(old) : new Map()
+  for (const [k, v] of Object.entries(fields)) {
+    if (v === null || v === undefined || v === '') info.delete(k)
+    else info.set(k, textString(String(v)))
+  }
+  const now = new Date()
+  const pad = (n) => String(n).padStart(2, '0')
+  info.set('ModDate', textString(`D:${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}${pad(now.getUTCSeconds())}Z`))
+  doc.trailer.set('Info', info)
+  const root = deref(doc, get(doc.trailer, 'Root'))
+  if (root instanceof Map) root.delete('Metadata')
+  return stampPages(doc, () => null)
 }

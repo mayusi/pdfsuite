@@ -1,95 +1,108 @@
-import { h, readBytes, saveBlob, setKids, fmtBytes } from '../ui/dom.js'
-import { Btn, Card, DropZone, ErrorText } from '../ui/widgets.js'
+import { h, stem, fmtBytes } from '../ui/dom.js'
+import { Button, Dropzone, Switch, FileChip, pickFiles, toast, Callout } from '../ui/kit.js'
+import { ToolHead, Workspace, ResultCard, openPdf, runTask, takeHandoff, mount, docMeta } from '../ui/tool.js'
 import { compressPdf } from '../pdf/ops.js'
 
+const LEVELS = {
+  lossless: { label: 'Lossless', desc: 'Repacks everything without touching image quality.', q: null },
+  balanced: { label: 'Balanced', desc: 'Re-encodes photos at good quality and caps them at 2000px. Best for most files.', q: 0.75, max: 2000 },
+  smallest: { label: 'Smallest', desc: 'Stronger photo compression, capped at 1400px. Great for email; photos get softer.', q: 0.55, max: 1400 },
+}
+
+/** Browser-side photo re-encoder handed to the engine. */
+const reimager = ({ q, max }) => async (dec) => {
+  let src
+  if (dec.rgba) {
+    const c = document.createElement('canvas')
+    c.width = dec.w
+    c.height = dec.h
+    c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(dec.rgba), dec.w, dec.h), 0, 0)
+    src = c
+  } else if (dec.mime === 'image/jpeg') {
+    src = await createImageBitmap(new Blob([dec.data], { type: 'image/jpeg' })).catch(() => null)
+  }
+  if (!src) return null
+  const k = Math.min(1, max / Math.max(src.width, src.height))
+  if (src.width * src.height < 120 * 120) return null // icons: not worth it
+  const c = document.createElement('canvas')
+  c.width = Math.max(1, Math.round(src.width * k))
+  c.height = Math.max(1, Math.round(src.height * k))
+  const x = c.getContext('2d')
+  x.fillStyle = '#fff' // JPEG has no alpha; any soft mask stays attached to the image
+  x.fillRect(0, 0, c.width, c.height)
+  x.drawImage(src, 0, 0, c.width, c.height)
+  src.close?.()
+  const blob = await new Promise((r) => c.toBlob(r, 'image/jpeg', q))
+  return blob ? new Uint8Array(await blob.arrayBuffer()) : null
+}
+
 export function Compress() {
-  let file = null
-  let bytes = null
-  let result = null // {bytes, before, after}
-  let reimageImgs = true
+  const { root, render } = mount()
+  let info = null
+  let level = 'balanced'
+  let stripMeta = false
   let busy = false
-  let error = ''
-  let loadGen = 0
-  const root = h('div', { class: 'tool' })
+  let result = null
 
   const load = async ([f]) => {
-    const my = ++loadGen
-    error = ''
-    file = f
-    bytes = null
-    result = null
     try {
-      const b = await readBytes(f)
-      if (my !== loadGen) return
-      bytes = b
-    } catch (e) {
-      if (my !== loadGen) return
-      error = 'could not read that file'
-      file = null
+      const i = await openPdf(f)
+      if (!i) return
+      info = i
+      result = null
+      paint()
+    } catch (e) { toast(e.message, { type: 'error' }) }
+  }
+
+  const run = () => runTask((b) => { busy = b; paint() }, async () => {
+    const L = LEVELS[level]
+    const r = await compressPdf(info.bytes, { reimage: L.q ? reimager(L) : undefined, stripMeta })
+    const smaller = r.after < info.size
+    result = { ...r, smaller, blob: new Blob([smaller ? r.bytes : info.bytes], { type: 'application/pdf' }), name: `${stem(info.name)}-compressed.pdf` }
+  })
+
+  function paint() {
+    if (!info) { render(ToolHead('compress'), Dropzone({ onFiles: load, title: 'Drop a PDF to make it smaller', tc: 'var(--c-secure)', icon: 'shrink' })); return }
+    if (result) {
+      const saved = info.size - result.after
+      const pct = Math.round((saved / info.size) * 100)
+      render(ToolHead('compress'), ResultCard({
+        title: result.smaller ? `${pct}% smaller` : 'Already well optimized',
+        sub: result.smaller ? `${fmtBytes(info.size)} → ${fmtBytes(result.after)}` : 'We couldn’t make this file smaller — you’re downloading the original.',
+        blob: result.blob, filename: result.name, toolId: 'compress', autoDownload: result.smaller,
+        extra: h('div', { class: 'stats' },
+          h('div', { class: 'stat' }, h('div', { class: 'sv' }, fmtBytes(info.size)), h('div', { class: 'sl' }, 'Before')),
+          h('div', { class: 'stat good' }, h('div', { class: 'sv' }, fmtBytes(Math.min(info.size, result.after))), h('div', { class: 'sl' }, 'After')),
+          h('div', { class: 'stat' }, h('div', { class: 'sv' }, `${result.images.recoded}/${result.images.total}`), h('div', { class: 'sl' }, 'Images re-compressed'))),
+        onAgain: () => { result = null; paint() },
+      }))
+      if (!result.smaller) toast('This PDF is already as small as we can make it', { type: 'info' })
+      return
     }
-    render()
-  }
-
-  const reimage = async (dec) => {
-    const bmp = await createImageBitmap(new Blob([dec.data], { type: dec.mime })).catch(() => null)
-    if (!bmp) return null
-    const canvas = document.createElement('canvas')
-    canvas.width = bmp.width
-    canvas.height = bmp.height
-    canvas.getContext('2d').drawImage(bmp, 0, 0)
-    const blob = await new Promise((res) => canvas.toBlob(res, 'image/jpeg', 0.72))
-    return blob ? new Uint8Array(await blob.arrayBuffer()) : null
-  }
-
-  const run = async () => {
-    busy = true
-    error = ''
-    result = null
-    render()
-    try {
-      result = await compressPdf(bytes, { reimage: reimageImgs ? reimage : undefined })
-      if (result.after >= result.before) {
-        result.note = 'already tight — rebuilt but not smaller'
-      }
-    } catch (e) {
-      error = e.message || 'compress failed'
-    } finally {
-      busy = false
-      render()
-    }
-  }
-
-  const download = () =>
-    saveBlob(new Blob([result.bytes], { type: 'application/pdf' }),
-      `${file.name.replace(/\.pdf$/i, '')}-small.pdf`)
-
-  function render() {
-    const saved = result ? result.before - result.after : 0
-    const pct = result ? Math.round((saved / result.before) * 100) : 0
-    setKids(root,
-      DropZone({ accept: 'application/pdf', onFiles: load }),
-      file
-        ? Card(
-            h('p', { class: 'meta' }, h('b', {}, file.name), ` — ${fmtBytes(bytes?.length ?? 0)}`),
-            h('label', { class: 'lbl chk' },
-              h('input', {
-                type: 'checkbox', checked: reimageImgs || undefined,
-                onchange: (e) => { reimageImgs = e.target.checked },
-              }),
-              ' Re-encode embedded images at lower quality (biggest wins, slight quality loss)'),
-            h('div', { class: 'btnrow' },
-              Btn(busy ? 'Compressing…' : 'Compress', { onclick: run, disabled: busy })),
-            result
-              ? h('p', { class: 'meta' },
-                  h('b', {}, `${fmtBytes(result.before)} → ${fmtBytes(result.after)}`),
-                  saved > 0 ? ` — saved ${fmtBytes(saved)} (${pct}%)` : ` — ${result.note}`)
-              : null,
-            result ? Btn('Download compressed PDF', { onclick: download }) : null,
-          )
-        : null,
-      ErrorText(error),
+    render(
+      ToolHead('compress'),
+      Workspace(
+        [
+          FileChip({ name: info.name, size: info.size, meta: docMeta(info), onReplace: async () => { const [f] = await pickFiles(); if (f) load([f]) } }),
+          h('div', { class: 'card card-pad stack-sm' },
+            Object.entries(LEVELS).map(([k, L]) => h('label', {
+              class: 'callout' + (k === level ? ' ok' : ''), style: { cursor: 'pointer', alignItems: 'center' },
+              onclick: () => { level = k; paint() },
+            }, h('input', { type: 'radio', name: 'lvl', checked: k === level, style: { accentColor: 'var(--accent)' } }),
+            h('div', {}, h('b', {}, L.label), h('div', { class: 'small muted' }, L.desc))))),
+        ],
+        [
+          h('div', { class: 'card stack' },
+            Switch('Remove metadata', stripMeta, (v) => (stripMeta = v), { hint: 'Author, title, dates and XMP — a few KB, and more private' }),
+            Callout('Text and vector graphics are always kept sharp — only photos are re-encoded, and only when it actually saves space.')),
+          h('div', { class: 'action-bar sticky-m' },
+            Button({ label: busy ? 'Compressing…' : 'Compress PDF', icon: 'shrink', variant: 'primary', size: 'lg', block: true, busy, onClick: run })),
+        ]),
     )
   }
-  render()
+
+  const ho = takeHandoff()
+  if (ho) load([Array.isArray(ho) ? ho[0] : ho])
+  else paint()
   return root
 }

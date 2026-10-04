@@ -308,24 +308,94 @@ export async function textRuns(doc, leaf) {
   for (const o of ops) {
     if (o.t !== 'text' || !o.str || o.inv || !o.glyphs?.length) continue
     if (Math.abs(o.rot) > 0.01) continue // rotated text: not editable in place
-    // tight box from the glyph extents
-    const x0 = matPt(o.m, o.glyphs[0].x, 0)[0]
-    const last = o.glyphs[o.glyphs.length - 1]
-    const x1 = matPt(o.m, last.x + last.w, 0)[0]
-    const top = o.y - o.h * 0.78, bottom = o.y + o.h * 0.22
-    runs.push({ str: o.str, x: Math.min(x0, x1), y: top, w: Math.abs(x1 - x0), h: bottom - top, base: o.y, size: o.h, font: o.font, color: o.fc })
+    // split one operator's glyphs into pieces at 2+ spaces or wide gaps —
+    // generators often emit "FROM:   Company ABC" as a single string
+    let piece = null
+    let spaces = 0
+    const flush = () => {
+      if (!piece) return
+      const s = piece.str.replace(/\s+$/, '')
+      if (s.trim()) runs.push({ ...piece, str: s.replace(/^\s+/, '') })
+      piece = null
+    }
+    for (const g of o.glyphs) {
+      const isSpace = !g.s.trim()
+      const gx0 = matPt(o.m, g.x, 0)[0], gx1 = matPt(o.m, g.x + g.w, 0)[0]
+      const left = Math.min(gx0, gx1), right = Math.max(gx0, gx1)
+      if (isSpace) { spaces++; if (piece) piece.str += g.s; continue }
+      if (piece && (spaces >= 2 || left - (piece.x + piece.w) > o.h * 0.6)) flush()
+      spaces = 0
+      if (!piece) piece = { str: '', x: left, y: o.y - o.h * 0.78, w: 0, h: o.h, base: o.y, size: o.h, font: o.font, color: o.fc }
+      piece.str += g.s
+      piece.w = right - piece.x
+    }
+    flush()
   }
-  // merge runs on the same baseline whose gap is small (kerned fragments → one word/line piece)
+  // merge runs on one baseline whose gap is word-sized (kerned fragments → one phrase)
   runs.sort((a, b) => a.base - b.base || a.x - b.x)
   const merged = []
   for (const r of runs) {
     const last = merged[merged.length - 1]
+    const gap = last ? r.x - (last.x + last.w) : 0
     if (last && Math.abs(last.base - r.base) < r.size * 0.25 && Math.abs(last.size - r.size) < r.size * 0.2 &&
-        r.x - (last.x + last.w) < r.size * 0.9 && r.x >= last.x) {
-      const gap = r.x - (last.x + last.w)
-      last.str += (gap > r.size * 0.18 && !last.str.endsWith(' ') ? ' ' : '') + r.str
+        gap < r.size * 0.45 && r.x >= last.x - 0.5) {
+      last.str += (gap > r.size * 0.15 && !last.str.endsWith(' ') ? ' ' : '') + r.str
       last.w = Math.max(last.x + last.w, r.x + r.w) - last.x
     } else merged.push({ ...r })
   }
   return merged
+}
+
+/**
+ * Find every occurrence of `query` on a page → [{x, y, w, h, text}] boxes in
+ * display space, glyph-accurate (for search-and-redact). Case-insensitive;
+ * whitespace in the query matches any run of spaces/line joins.
+ * opts.regex: treat query as a RegExp source (e.g. emails, phone numbers).
+ */
+export async function findText(doc, leaf, query, { regex = false } = {}) {
+  if (!query) return []
+  const { ops } = await collectDrawOps(doc, leaf, { glyphs: true, annots: false })
+  // flatten glyphs into reading-order lines
+  const glyphs = []
+  for (const o of ops) {
+    if (o.t !== 'text' || !o.glyphs?.length || o.inv) continue
+    for (const g of o.glyphs) {
+      const [x0, yb] = matPt(o.m, g.x, 0)
+      const [x1] = matPt(o.m, g.x + g.w, 0)
+      glyphs.push({ s: g.s, x: Math.min(x0, x1), w: Math.abs(x1 - x0), base: yb, size: o.h, rot: o.rot })
+    }
+  }
+  const flat = glyphs.filter((g) => Math.abs(g.rot) < 0.01).sort((a, b) => (Math.abs(a.base - b.base) < a.size * 0.4 ? a.x - b.x : a.base - b.base))
+  let text = ''
+  const map = [] // char index → glyph index
+  flat.forEach((g, i) => {
+    const prev = flat[i - 1]
+    if (prev) {
+      const newLine = Math.abs(prev.base - g.base) >= prev.size * 0.4
+      const gap = g.x - (prev.x + prev.w)
+      if (newLine || gap > g.size * 0.18) { text += ' '; map.push(-1) }
+    }
+    for (const ch of g.s) { text += ch; map.push(i) }
+  })
+  let re
+  try {
+    re = regex ? new RegExp(query, 'gi') : new RegExp(query.trim().split(/\s+/).map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s+'), 'gi')
+  } catch { return [] }
+  const out = []
+  for (const m of text.matchAll(re)) {
+    if (!m[0]) continue
+    const idx = map.slice(m.index, m.index + m[0].length).filter((k) => k >= 0)
+    if (!idx.length) continue
+    // one box per line the match spans
+    const lines = new Map()
+    for (const k of new Set(idx)) {
+      const g = flat[k]
+      const key = Math.round(g.base * 2)
+      const b = lines.get(key) ?? { x0: Infinity, x1: -Infinity, base: g.base, size: g.size }
+      b.x0 = Math.min(b.x0, g.x); b.x1 = Math.max(b.x1, g.x + g.w); b.size = Math.max(b.size, g.size)
+      lines.set(key, b)
+    }
+    for (const b of lines.values()) out.push({ x: b.x0 - 0.5, y: b.base - b.size * 0.8, w: b.x1 - b.x0 + 1, h: b.size * 1.02, text: m[0] })
+  }
+  return out
 }

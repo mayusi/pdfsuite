@@ -1,287 +1,190 @@
-import { h, setKids, readBytes, saveBlob } from '../ui/dom.js'
-import { Btn, DropZone, ErrorText, PageGrid, Toolbar, openLightbox } from '../ui/widgets.js'
-import { get } from '../pdf/types.js'
-import { parsePdf } from '../pdf/parse.js'
-import { pageLeaves, organizePages, pagePreview } from '../pdf/ops.js'
-import { renderPage } from '../pdf/render.js'
-
-/** Copy a rendered canvas (cloneNode doesn't carry the bitmap). */
-const cloneCanvas = (src) => {
-  const c = document.createElement('canvas')
-  c.width = src.width
-  c.height = src.height
-  c.getContext('2d').drawImage(src, 0, 0)
-  c.className = src.className
-  c.draggable = false
-  return c
-}
+import { h, plural, stem, saveBlob } from '../ui/dom.js'
+import { Button, IconButton, Dropzone, FileChip, pickFiles, sortable, toast, menu } from '../ui/kit.js'
+import { ToolHead, Workspace, ResultCard, openPdf, runTask, takeHandoff, mount, docMeta } from '../ui/tool.js'
+import { PageCard, pageThumbs, zoomPage } from '../ui/pages.js'
+import { organizePages } from '../pdf/ops.js'
 
 export function Organize() {
-  let file = null
-  let bytes = null
-  let doc = null
-  let leaves = []
-  let items = [] // {page, w, h, rotation, deleted, canvas, imgUrl, text}
-  let sel = new Set() // selected item objects (identity survives reorder)
-  let lastIdx = null // shift-click anchor
-  let moveTo = 1
-  let urls = []
-  let history = [] // undo stack of item-list snapshots
+  const { root, render } = mount()
+  let info = null
+  let extras = [] // extra opened PDFs: {info, thumbs}
+  let thumbs = null
+  let items = [] // {id, doc, page (0-based), rotation, blank?:[w,h]}
+  let sel = new Set() // item ids
+  let lastClick = null
+  let history = []
+  let future = []
   let busy = false
-  let error = ''
-  let loadGen = 0
-  const imgCache = new Map() // shared decode cache across pages of this doc
-  const root = h('div', { class: 'tool' })
+  let result = null
+  let uid = 0
+
+  const snapshot = () => items.map((x) => ({ ...x }))
+  const mutate = (fn) => { history.push(snapshot()); if (history.length > 100) history.shift(); future = []; fn(); paint() }
+  const undo = () => { if (!history.length) return; future.push(snapshot()); items = history.pop(); sel = new Set([...sel].filter((id) => items.some((x) => x.id === id))); paint() }
+  const redo = () => { if (!future.length) return; history.push(snapshot()); items = future.pop(); paint() }
 
   const load = async ([f]) => {
-    const my = ++loadGen
-    error = ''
-    file = f
-    items = []
-    sel = new Set()
-    lastIdx = null
-    history = []
-    imgCache.clear()
-    for (const u of urls) URL.revokeObjectURL(u)
-    urls = []
-    render()
     try {
-      const b = await readBytes(f)
-      if (my !== loadGen) return
-      const d = await parsePdf(b)
-      if (my !== loadGen) return
-      bytes = b
-      doc = d
-      leaves = pageLeaves(d)
-      items = leaves.map((leaf, i) => {
-        const mb = get(leaf.dict, 'MediaBox') ?? leaf.inh.MediaBox ?? [0, 0, 0, 0]
-        return {
-          page: i + 1,
-          w: Math.round(mb[2] - mb[0]),
-          h: Math.round(mb[3] - mb[1]),
-          rotation: 0,
-          deleted: false,
-          canvas: null,
-          imgUrl: null,
-          text: '',
-        }
-      })
-      render()
-      // fill previews progressively: real mini-render first, image/text fallback
-      leaves.forEach(async (leaf, i) => {
-        try {
-          const canvas = await renderPage(d, leaf, { width: 200, cache: imgCache })
-          if (my !== loadGen) return
-          if (canvas) {
-            canvas.className = 'pcanvas'
-            canvas.draggable = false
-            items[i].canvas = canvas
-          } else {
-            const pv = await pagePreview(d, leaf)
-            if (my !== loadGen) return
-            if (pv.img) {
-              items[i].imgUrl = URL.createObjectURL(new Blob([pv.img.data], { type: pv.img.mime }))
-              urls.push(items[i].imgUrl)
-            } else {
-              items[i].text = pv.text
-            }
-          }
-          render()
-        } catch { /* card keeps dims */ }
-      })
-    } catch (e) {
-      if (my !== loadGen) return
-      error = e.message || 'could not read that PDF'
-      file = null
-      bytes = null
-      doc = null
-    }
-    render()
+      const i = await openPdf(f)
+      if (!i) return
+      info = i
+      thumbs?.disconnect()
+      thumbs = pageThumbs(info)
+      extras = []
+      items = info.leaves.map((_, p) => ({ id: ++uid, doc: 0, page: p, rotation: 0 }))
+      sel = new Set(); history = []; future = []; result = null
+      paint()
+    } catch (e) { toast(e.message, { type: 'error' }) }
   }
 
-  const mutate = (fn) => {
-    history.push([...items])
-    if (history.length > 50) history.shift()
-    fn()
-    render()
+  const docInfo = (d) => (d === 0 ? info : extras[d - 1].info)
+  const docThumbs = (d) => (d === 0 ? thumbs : extras[d - 1].thumbs)
+  const dimsOf = (it) => (it.blank ? { w: it.blank[0], h: it.blank[1], rotate: 0 } : docInfo(it.doc).dims[it.page])
+
+  const insertPdf = async () => {
+    const [f] = await pickFiles()
+    if (!f) return
+    try {
+      const xi = await openPdf(f)
+      if (!xi) return
+      extras.push({ info: xi, thumbs: pageThumbs(xi) })
+      const d = extras.length
+      const at = sel.size ? Math.max(...items.map((x, k) => (sel.has(x.id) ? k : -1))) + 1 : items.length
+      mutate(() => items.splice(at, 0, ...xi.leaves.map((_, p) => ({ id: ++uid, doc: d, page: p, rotation: 0 }))))
+      toast(`Inserted ${plural(xi.leaves.length, 'page')} from ${f.name}`)
+    } catch (e) { toast(e.message, { type: 'error' }) }
   }
 
-  const undo = () => {
-    if (!history.length) return
-    items = history.pop()
-    sel = new Set([...sel].filter((x) => items.includes(x)))
-    render()
+  const selIdx = () => items.map((x, k) => (sel.has(x.id) ? k : -1)).filter((k) => k >= 0)
+  const rot = (ids, d) => mutate(() => { for (const x of items) if (ids.has(x.id)) x.rotation = (x.rotation + d + 360) % 360 })
+  const del = (ids) => {
+    if (ids.size >= items.length) { toast('A PDF needs at least one page', { type: 'error' }); return }
+    mutate(() => { items = items.filter((x) => !ids.has(x.id)); sel = new Set([...sel].filter((id) => !ids.has(id))) })
   }
-
-  const onSelect = (i, shift) => {
-    if (shift && lastIdx !== null) {
-      const [a, b] = lastIdx < i ? [lastIdx, i] : [i, lastIdx]
-      for (let k = a; k <= b; k++) sel.add(items[k])
-    } else {
-      sel.has(items[i]) ? sel.delete(items[i]) : sel.add(items[i])
-    }
-    lastIdx = i
-    render()
+  const dup = (ids) => mutate(() => {
+    const out = []
+    for (const x of items) { out.push(x); if (ids.has(x.id)) out.push({ ...x, id: ++uid }) }
+    items = out
+  })
+  const blankAfter = (k) => {
+    const d = dimsOf(items[k] ?? items[items.length - 1])
+    const w = d.rotate % 180 === 0 ? d.w : d.h, hh = d.rotate % 180 === 0 ? d.h : d.w
+    mutate(() => items.splice(k + 1, 0, { id: ++uid, blank: [w, hh], rotation: 0 }))
   }
-
-  const applySel = (fn) => mutate(() => { items = items.map((x) => (sel.has(x) ? fn(x) : x)) })
-
-  const moveSelected = (where) => mutate(() => {
-    const picked = items.filter((x) => sel.has(x))
-    const rest = items.filter((x) => !sel.has(x))
-    if (!picked.length) return
-    if (where === 'front') items = [...picked, ...rest]
-    else if (where === 'back') items = [...rest, ...picked]
-    else {
-      const idx = Math.max(0, Math.min(rest.length, moveTo - 1))
-      items = [...rest.slice(0, idx), ...picked, ...rest.slice(idx)]
-    }
+  const moveSel = (where) => mutate(() => {
+    const picked = items.filter((x) => sel.has(x.id))
+    const rest = items.filter((x) => !sel.has(x.id))
+    items = where === 'start' ? [...picked, ...rest] : [...rest, ...picked]
   })
 
-  const dupSelected = () => mutate(() => {
-    const picked = items.filter((x) => sel.has(x))
-    if (!picked.length) return
-    const lastPos = items.lastIndexOf(picked[picked.length - 1])
-    // clone canvas nodes — a DOM node can only live in one card at a time
-    const dups = picked.map((x) => ({ ...x, canvas: x.canvas ? cloneCanvas(x.canvas) : null }))
-    items = [...items.slice(0, lastPos + 1), ...dups, ...items.slice(lastPos + 1)]
+  const click = (it, k, e) => {
+    if (e.shiftKey && lastClick !== null) {
+      const [a, b] = lastClick < k ? [lastClick, k] : [k, lastClick]
+      for (let j = a; j <= b; j++) sel.add(items[j].id)
+    } else if (sel.has(it.id)) sel.delete(it.id)
+    else sel.add(it.id)
+    lastClick = k
+    paint()
+  }
+
+  const opsList = (keep) => keep.map((x) => (x.blank ? { blank: x.blank } : { doc: x.doc, page: x.page + 1, rotation: x.rotation }))
+  const save = (only = null) => runTask((b) => { busy = b; paint() }, async () => {
+    const keep = only ?? items
+    const out = await organizePages(info.bytes, opsList(keep), { extra: extras.map((e) => e.info.bytes) })
+    const name = `${stem(info.name)}${only ? '-selected' : '-organized'}.pdf`
+    const blob = new Blob([out], { type: 'application/pdf' })
+    if (only) { saveBlob(blob, name); toast(`Saved ${plural(keep.length, 'page')} as ${name}`); return }
+    result = { blob, name, n: keep.length }
   })
 
-  const onZoom = async (i) => {
-    const it = items[i]
-    const leaf = leaves[it.page - 1]
-    try {
-      const canvas = await renderPage(doc, leaf, { width: Math.min(860, it.w * 1.5), cache: imgCache })
-      if (canvas) openLightbox(canvas, `page ${it.page} · ${it.w}×${it.h}pt${it.rotation ? ` · rotated ${it.rotation}°` : ''}`)
-    } catch { /* no preview */ }
-  }
-
-  const extractSel = async () => {
-    const picked = items.filter((x) => sel.has(x) && !x.deleted)
-    if (!picked.length) return
-    busy = true
-    error = ''
-    render()
-    try {
-      const out = await organizePages(bytes, picked.map((x) => ({ page: x.page, rotation: x.rotation })))
-      saveBlob(new Blob([out], { type: 'application/pdf' }), `${file.name.replace(/\.pdf$/i, '')}-extract.pdf`)
-    } catch (e) {
-      error = e.message || 'failed'
-    } finally {
-      busy = false
-      render()
-    }
-  }
-
-  const run = async () => {
-    busy = true
-    error = ''
-    render()
-    try {
-      const ops = items.filter((it) => !it.deleted).map((it) => ({ page: it.page, rotation: it.rotation }))
-      if (!ops.length) throw new Error('all pages deleted')
-      const out = await organizePages(bytes, ops)
-      saveBlob(
-        new Blob([out], { type: 'application/pdf' }),
-        `${file.name.replace(/\.pdf$/i, '')}-organized.pdf`,
-      )
-    } catch (e) {
-      error = e.message || 'failed'
-    } finally {
-      busy = false
-      render()
-    }
-  }
-
-  // keyboard: Ctrl+A select-all, Del delete, Ctrl+Z undo — self-removes when detached
   const onKey = (e) => {
-    if (!root.isConnected) return document.removeEventListener('keydown', onKey)
-    if (!items.length || /input|textarea|select/i.test(e.target.tagName)) return
-    if (e.ctrlKey && e.key === 'a') { e.preventDefault(); sel = new Set(items); render() }
-    else if (e.key === 'Delete' && sel.size) applySel((x) => ({ ...x, deleted: true }))
-    else if (e.ctrlKey && e.key === 'z') { e.preventDefault(); undo() }
+    if (!root.isConnected) { document.removeEventListener('keydown', onKey); return }
+    if (!info || result || /input|textarea|select/i.test(e.target.tagName)) return
+    const mod = e.ctrlKey || e.metaKey
+    const k = e.key.toLowerCase()
+    if (mod && k === 'z' && !e.shiftKey) { e.preventDefault(); undo() }
+    else if (mod && (k === 'y' || (k === 'z' && e.shiftKey))) { e.preventDefault(); redo() }
+    else if (mod && k === 'a') { e.preventDefault(); sel = new Set(items.map((x) => x.id)); paint() }
+    else if ((e.key === 'Delete' || e.key === 'Backspace') && sel.size) { e.preventDefault(); del(new Set(sel)) }
+    else if (e.key === 'Escape' && sel.size) { sel = new Set(); paint() }
   }
   document.addEventListener('keydown', onKey)
 
-  function render() {
-    const kept = items.filter((i) => !i.deleted).length
-    const n = sel.size
-    setKids(root,
-      DropZone({ accept: 'application/pdf', onFiles: load }),
-      items.length
-        ? h('p', { class: 'meta dim' },
-            `Click to select (shift = range) · drag a card onto another to swap · ⌨ Ctrl+A / Del / Ctrl+Z · ${kept} of ${items.length} kept${n ? ` · ${n} selected` : ''}`)
-        : null,
-      items.length
-        ? Toolbar([
-            ['Select all', () => { sel = new Set(items); render() }],
-            ['Clear', () => { sel = new Set(); render() }, !n],
-            ['Invert', () => { sel = new Set(items.filter((x) => !sel.has(x))); render() }],
-            ['⇤ To front', () => moveSelected('front'), !n],
-            ['To back ⇥', () => moveSelected('back'), !n],
-            ['Rotate sel +90°', () => applySel((x) => ({ ...x, rotation: (x.rotation + 90) % 360 })), !n],
-            ['Delete sel', () => applySel((x) => ({ ...x, deleted: true })), !n],
-            ['Duplicate sel', dupSelected, !n],
-            ['↶ Undo', undo, !history.length],
-            ['Restore all', () => mutate(() => { items = items.map((x) => ({ ...x, deleted: false })) }), kept === items.length],
-            ['Reset all', () => mutate(() => {
-              items = items.map((x) => ({ ...x, rotation: 0, deleted: false }))
-              items.sort((a, b) => a.page - b.page)
-              sel = new Set()
-            })],
-          ])
-        : null,
-      items.length
-        ? h('div', { class: 'toolbar' },
-            h('label', { class: 'lbl', style: { alignSelf: 'center', margin: 0 } }, 'Move selected to position'),
-            h('input', {
-              class: 'textin num', type: 'number', value: moveTo, min: 1, max: items.length,
-              style: { width: '80px', margin: 0 },
-              oninput: (e) => (moveTo = parseInt(e.target.value, 10) || 1),
-            }),
-            h('button', { type: 'button', class: 'tbtn', disabled: !n || undefined, onclick: () => moveSelected('at') }, 'Move'),
-            n ? h('button', { type: 'button', class: 'tbtn', onclick: extractSel, disabled: busy || undefined }, 'Download selected as PDF') : null,
-          )
-        : null,
-      items.length
-        ? PageGrid({
-            items,
-            selected: sel,
-            onSelect,
-            onZoom,
-            onDrop: (from, to) => mutate(() => {
-              if (sel.size > 1 && sel.has(items[from])) {
-                // block-move the selection, dragged item lands at index `to`
-                const picked = items.filter((x) => sel.has(x))
-                const rest = items.filter((x) => !sel.has(x))
-                const at = Math.max(0, Math.min(rest.length, to - picked.indexOf(items[from])))
-                items = [...rest.slice(0, at), ...picked, ...rest.slice(at)]
-              } else {
-                const c = [...items]
-                const tmp = c[from]
-                c[from] = c[to]
-                c[to] = tmp
-                items = c
-              }
-            }),
-            onRotate: (i, delta) => mutate(() => {
-              items = items.map((x, j) => (j === i ? { ...x, rotation: ((x.rotation + delta) % 360 + 360) % 360 } : x))
-            }),
-            onToggleDelete: (i) => mutate(() => {
-              items = items.map((x, j) => (j === i ? { ...x, deleted: !x.deleted } : x))
-            }),
-          })
-        : null,
-      ErrorText(error),
-      items.length
-        ? Btn(busy ? 'Building…' : `Download organized PDF (${kept} pages)`, { onclick: run, disabled: busy || kept === 0 })
-        : null,
-    )
-    // apply rotation to rendered canvases so cards reflect it
-    for (const it of items) {
-      if (it.canvas) it.canvas.style.transform = it.rotation ? `rotate(${it.rotation}deg)` : ''
+  function paint() {
+    if (!info) { render(ToolHead('organize'), Dropzone({ onFiles: load, title: 'Drop a PDF to rearrange its pages', tc: 'var(--c-organize)', icon: 'grid' })); return }
+    if (result) {
+      render(ToolHead('organize'), ResultCard({
+        title: 'Pages organized', blob: result.blob, filename: result.name, toolId: 'organize', sub: `${result.name} · ${plural(result.n, 'page')}`,
+        onAgain: () => { result = null; paint() },
+      }))
+      return
     }
+    const grid = h('div', { class: 'pgrid' }, items.map((it, k) => PageCard({
+      thumbs: it.blank ? null : docThumbs(it.doc), src: it.page, blank: !!it.blank, dims: dimsOf(it), rotation: it.rotation,
+      label: `${k + 1}`, sub: it.blank ? 'blank' : it.doc ? `from ${extras[it.doc - 1].info.name.slice(0, 14)}` : it.page !== k ? `was ${it.page + 1}` : '',
+      selected: sel.has(it.id), draggable: true,
+      onClick: (e) => click(it, k, e),
+      ops: [
+        !it.blank ? { icon: 'zoomIn', tip: 'Preview', onClick: () => zoomPage(docInfo(it.doc), it.page, it.rotation) } : null,
+        { icon: 'rotl', tip: 'Rotate left', onClick: () => rot(new Set([it.id]), -90) },
+        { icon: 'rotate', tip: 'Rotate right', onClick: () => rot(new Set([it.id]), 90) },
+        { icon: 'more', tip: 'More', onClick: () => {
+          const btn = grid.children[k]?.querySelector('.pops button:last-child')
+          menu(btn ?? grid, [
+            { label: 'Duplicate', icon: 'copy', onClick: () => dup(new Set([it.id])) },
+            { label: 'Insert blank page after', icon: 'pageAdd', onClick: () => blankAfter(k) },
+            { label: 'Move to start', icon: 'up', onClick: () => mutate(() => { items.splice(k, 1); items.unshift(it) }) },
+            { label: 'Move to end', icon: 'down', onClick: () => mutate(() => { items.splice(k, 1); items.push(it) }) },
+            'sep',
+            { label: 'Delete page', icon: 'trash', danger: true, onClick: () => del(new Set([it.id])) },
+          ], { align: 'right' })
+        } },
+      ].filter(Boolean),
+    })))
+    sortable(grid, '.pcard', (from, to) => mutate(() => { const [x] = items.splice(from, 1); items.splice(to, 0, x) }))
+    const n = sel.size
+    const ids = new Set(sel)
+    const removed = info.leaves.length + extras.reduce((a, e) => a + e.info.leaves.length, 0) - items.filter((x) => !x.blank).length
+    render(
+      ToolHead('organize'),
+      Workspace(
+        [
+          FileChip({ name: info.name, size: info.size, meta: docMeta(info), onReplace: async () => { const [f] = await pickFiles(); if (f) load([f]) } }),
+          h('div', { class: 'row between' },
+            h('div', { class: 'row', style: { gap: '6px' } },
+              IconButton('undo', 'Undo (Ctrl+Z)', undo, { disabled: !history.length }),
+              IconButton('redo', 'Redo (Ctrl+Shift+Z)', redo, { disabled: !future.length }),
+              h('span', { class: 'muted small' }, n ? `${plural(n, 'page')} selected` : 'Drag pages to reorder · click to select · Shift-click for a range')),
+            h('div', { class: 'row', style: { gap: '6px' } },
+              Button({ label: n === items.length ? 'Clear' : 'Select all', size: 'sm', onClick: () => { sel = n === items.length ? new Set() : new Set(items.map((x) => x.id)); paint() } }))),
+          n ? h('div', { class: 'card', style: { padding: '8px', position: 'sticky', top: '66px', zIndex: 5 } }, h('div', { class: 'row', style: { gap: '6px' } },
+            Button({ label: 'Rotate left', icon: 'rotl', size: 'sm', onClick: () => rot(ids, -90) }),
+            Button({ label: 'Rotate right', icon: 'rotate', size: 'sm', onClick: () => rot(ids, 90) }),
+            Button({ label: 'Duplicate', icon: 'copy', size: 'sm', onClick: () => dup(ids) }),
+            Button({ label: 'To start', icon: 'up', size: 'sm', onClick: () => moveSel('start') }),
+            Button({ label: 'To end', icon: 'down', size: 'sm', onClick: () => moveSel('end') }),
+            Button({ label: 'Save selected as PDF', icon: 'download', size: 'sm', onClick: () => save(items.filter((x) => ids.has(x.id))) }),
+            Button({ label: 'Delete', icon: 'trash', size: 'sm', variant: 'danger', onClick: () => del(ids) }))) : null,
+          grid,
+        ],
+        [
+          h('div', { class: 'card stack-sm' },
+            h('div', { class: 'card-title' }, 'Add pages'),
+            Button({ label: 'Blank page at end', icon: 'pageAdd', block: true, onClick: () => blankAfter(items.length - 1) }),
+            Button({ label: 'Pages from another PDF', icon: 'files', block: true, onClick: insertPdf }),
+            h('div', { class: 'divider' }),
+            h('div', { class: 'card-title' }, 'Whole document'),
+            Button({ label: 'Reverse page order', icon: 'refresh', block: true, onClick: () => mutate(() => items.reverse()) }),
+            Button({ label: 'Reset all changes', icon: 'undo', block: true, disabled: !history.length && !extras.length, onClick: () => load([info.file]) })),
+          h('div', { class: 'action-bar sticky-m' },
+            Button({ label: busy ? 'Saving…' : 'Save PDF', icon: 'download', variant: 'primary', size: 'lg', block: true, busy, onClick: () => save() }),
+            h('div', { class: 'summary' }, `${plural(items.length, 'page')}${removed > 0 ? ` · ${removed} removed` : ''}`)),
+        ]),
+    )
   }
-  render()
+
+  const ho = takeHandoff()
+  if (ho) load([Array.isArray(ho) ? ho[0] : ho])
+  else paint()
   return root
 }
