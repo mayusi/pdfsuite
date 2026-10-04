@@ -8,8 +8,9 @@ import {
   addPageNumbers, collectDrawOps, decodeString, displayTransform, extractImages,
   extractPages, fontMap, imagesToPdf, jpegInfo, mergePdfs,
   organizePages, pageCount, pageDims, pageLeaves, pagePreview, parseRanges,
-  parseToUnicode, readMetadata, scrubPdf, splitPdf, tokenizeContent, unPredict,
+  parseToUnicode, readMetadata, scrubPdf, splitPdf, tokenizeContent,
 } from '../src/pdf/ops.js'
+import { unPredict } from '../src/pdf/filters.js'
 import { crc32, zipStore } from '../src/zip.js'
 import { pngEncode, zlibStore } from '../src/png.js'
 
@@ -957,7 +958,7 @@ describe('compressPdf', () => {
 
 describe('protectPdf/decryptPdf', () => {
   it('encrypts strings+streams, trailer carries /Encrypt, roundtrip unlocks', async () => {
-    const { protectPdf, decryptPdf } = await import('../src/pdf/ops.js')
+    const { protectPdf, decryptPdf } = await import('../src/pdf/security.js')
     const src = classicPdf([300, 400])
     const locked = await protectPdf(src, 'hunter2')
     await assert.rejects(() => parsePdf(locked), /password-protected/, 'plain parse refuses encrypted docs')
@@ -1146,8 +1147,8 @@ describe('review fixes', () => {
     assert.equal(p.lw, 0, 'hairline preserved')
   })
 
-  it('decryptPdf rejects AES/non-RC4 encrypt dicts loudly', async () => {
-    const { decryptPdf } = await import('../src/pdf/ops.js')
+  it('decryptPdf authenticates AES-128 dicts (bad password → wrong password) and rejects foreign handlers', async () => {
+    const { decryptPdf } = await import('../src/pdf/security.js')
     const plain = classicPdf([100])
     const txt = dec(plain)
     const encDict = '<< /Filter /Standard /V 4 /R 4 /Length 128 /P -4 ' +
@@ -1157,11 +1158,13 @@ describe('review fixes', () => {
     const patched = txt.replace(/trailer\n<< \/Size (\d+) \/Root 1 0 R >>/,
       `9 0 obj\n${encDict}\nendobj\ntrailer\n<< /Size $1 /Root 1 0 R /Encrypt 9 0 R /ID [<aa> <bb>] >>`)
     assert.notEqual(patched, txt, 'fixture patched')
-    await assert.rejects(() => decryptPdf(enc(patched), 'x'), /unsupported/i)
+    await assert.rejects(() => decryptPdf(enc(patched), 'x'), /wrong password/i)
+    const pubsec = patched.replace('/Filter /Standard', '/Filter /Adobe.PubSec')
+    await assert.rejects(() => decryptPdf(enc(pubsec), 'x'), /unsupported security handler/i)
   })
 
   it('decryptPdf uses SOURCE object numbers (sparse-numbered fixture)', async () => {
-    const { decryptPdf } = await import('../src/pdf/ops.js')
+    const { decryptPdf } = await import('../src/pdf/security.js')
     const { md5, rc4 } = await import('../src/pdf/crypto.js')
     // replicate the Standard R3 algorithm independently — that is the point
     const PAD = new Uint8Array([0x28, 0xbf, 0x4e, 0x5e, 0x4e, 0x75, 0x8a, 0x41, 0x64, 0x00, 0x4e, 0x56,
@@ -1230,7 +1233,7 @@ describe('review fixes', () => {
   })
 
   it('decryptPdf unpacks encrypted ObjStm containers', async () => {
-    const { decryptPdf } = await import('../src/pdf/ops.js')
+    const { decryptPdf } = await import('../src/pdf/security.js')
     const { md5, rc4 } = await import('../src/pdf/crypto.js')
     const PAD = new Uint8Array([0x28, 0xbf, 0x4e, 0x5e, 0x4e, 0x75, 0x8a, 0x41, 0x64, 0x00, 0x4e, 0x56,
       0xff, 0xfa, 0x01, 0x08, 0x2e, 0x2e, 0x00, 0xb6, 0xd0, 0x68, 0x3e, 0x80, 0x2f, 0x0c, 0xa9, 0xfe,

@@ -557,6 +557,445 @@ function rc4(key, data) {
   return out
 }
 
+// ---------- AES (FIPS-197) — 128/256-bit keys, CBC mode ----------
+
+const SBOX = new Uint8Array(256)
+const INV_SBOX = new Uint8Array(256)
+const xt = (b) => ((b << 1) ^ (b & 0x80 ? 0x1b : 0)) & 0xff
+const gmul = (a, b) => {
+  let r = 0
+  while (b) { if (b & 1) r ^= a; a = xt(a); b >>= 1 }
+  return r
+}
+{
+  // S-box = affine transform of the GF(2^8) multiplicative inverse
+  for (let i = 0; i < 256; i++) {
+    let inv = 0
+    if (i) for (let j = 1; j < 256; j++) if (gmul(i, j) === 1) { inv = j; break }
+    let x = inv
+    let s = inv
+    for (let k = 0; k < 4; k++) { x = ((x << 1) | (x >> 7)) & 0xff; s ^= x }
+    SBOX[i] = s ^ 0x63
+  }
+  for (let i = 0; i < 256; i++) INV_SBOX[SBOX[i]] = i
+}
+
+/** Expand a 16/32-byte key → round keys (Uint8Array of 16*(rounds+1)). */
+function aesExpand(key) {
+  const nk = key.length / 4
+  const rounds = nk + 6
+  const w = new Uint8Array(16 * (rounds + 1))
+  w.set(key)
+  let rcon = 1
+  for (let i = nk; i < 4 * (rounds + 1); i++) {
+    let t = w.slice(4 * (i - 1), 4 * i)
+    if (i % nk === 0) {
+      t = Uint8Array.of(SBOX[t[1]] ^ rcon, SBOX[t[2]], SBOX[t[3]], SBOX[t[0]])
+      rcon = xt(rcon)
+    } else if (nk > 6 && i % nk === 4) t = t.map((b) => SBOX[b])
+    for (let k = 0; k < 4; k++) w[4 * i + k] = w[4 * (i - nk) + k] ^ t[k]
+  }
+  return { w, rounds }
+}
+
+function aesEncBlock({ w, rounds }, inp, out) {
+  const s = inp.slice(0, 16)
+  for (let i = 0; i < 16; i++) s[i] ^= w[i]
+  for (let r = 1; r <= rounds; r++) {
+    for (let i = 0; i < 16; i++) s[i] = SBOX[s[i]]
+    // shift rows (column-major state)
+    let t = s[1]; s[1] = s[5]; s[5] = s[9]; s[9] = s[13]; s[13] = t
+    t = s[2]; s[2] = s[10]; s[10] = t; t = s[6]; s[6] = s[14]; s[14] = t
+    t = s[15]; s[15] = s[11]; s[11] = s[7]; s[7] = s[3]; s[3] = t
+    if (r !== rounds) {
+      for (let c = 0; c < 16; c += 4) {
+        const a0 = s[c], a1 = s[c + 1], a2 = s[c + 2], a3 = s[c + 3]
+        s[c] = xt(a0) ^ xt(a1) ^ a1 ^ a2 ^ a3
+        s[c + 1] = a0 ^ xt(a1) ^ xt(a2) ^ a2 ^ a3
+        s[c + 2] = a0 ^ a1 ^ xt(a2) ^ xt(a3) ^ a3
+        s[c + 3] = xt(a0) ^ a0 ^ a1 ^ a2 ^ xt(a3)
+      }
+    }
+    for (let i = 0; i < 16; i++) s[i] ^= w[16 * r + i]
+  }
+  out.set(s)
+}
+
+function aesDecBlock({ w, rounds }, inp, out) {
+  const s = inp.slice(0, 16)
+  for (let i = 0; i < 16; i++) s[i] ^= w[16 * rounds + i]
+  for (let r = rounds - 1; r >= 0; r--) {
+    let t = s[13]; s[13] = s[9]; s[9] = s[5]; s[5] = s[1]; s[1] = t
+    t = s[2]; s[2] = s[10]; s[10] = t; t = s[6]; s[6] = s[14]; s[14] = t
+    t = s[3]; s[3] = s[7]; s[7] = s[11]; s[11] = s[15]; s[15] = t
+    for (let i = 0; i < 16; i++) s[i] = INV_SBOX[s[i]]
+    for (let i = 0; i < 16; i++) s[i] ^= w[16 * r + i]
+    if (r !== 0) {
+      for (let c = 0; c < 16; c += 4) {
+        const a0 = s[c], a1 = s[c + 1], a2 = s[c + 2], a3 = s[c + 3]
+        s[c] = gmul(a0, 14) ^ gmul(a1, 11) ^ gmul(a2, 13) ^ gmul(a3, 9)
+        s[c + 1] = gmul(a0, 9) ^ gmul(a1, 14) ^ gmul(a2, 11) ^ gmul(a3, 13)
+        s[c + 2] = gmul(a0, 13) ^ gmul(a1, 9) ^ gmul(a2, 14) ^ gmul(a3, 11)
+        s[c + 3] = gmul(a0, 11) ^ gmul(a1, 13) ^ gmul(a2, 9) ^ gmul(a3, 14)
+      }
+    }
+  }
+  out.set(s)
+}
+
+/** AES-CBC encrypt. pad=true adds PKCS#5 padding; otherwise data must be ×16. */
+function aesCbcEncrypt(key, iv, data, pad = true) {
+  const ks = aesExpand(key)
+  const n = pad ? 16 - (data.length % 16) : 0
+  const buf = new Uint8Array(data.length + n)
+  buf.set(data)
+  buf.fill(n, data.length)
+  if (buf.length % 16) throw new Error('aes: data not block-aligned')
+  const out = new Uint8Array(buf.length)
+  let prev = iv
+  const blk = new Uint8Array(16)
+  for (let o = 0; o < buf.length; o += 16) {
+    for (let i = 0; i < 16; i++) blk[i] = buf[o + i] ^ prev[i]
+    aesEncBlock(ks, blk, out.subarray(o, o + 16))
+    prev = out.subarray(o, o + 16)
+  }
+  return out
+}
+
+/** AES-CBC decrypt. unpad strips PKCS#5 padding when valid (lenient when not). */
+function aesCbcDecrypt(key, iv, data, unpad = true) {
+  const ks = aesExpand(key)
+  const len = data.length - (data.length % 16)
+  const out = new Uint8Array(len)
+  let prev = iv
+  const blk = new Uint8Array(16)
+  for (let o = 0; o < len; o += 16) {
+    aesDecBlock(ks, data.subarray(o, o + 16), blk)
+    for (let i = 0; i < 16; i++) out[o + i] = blk[i] ^ prev[i]
+    prev = data.subarray(o, o + 16)
+  }
+  if (!unpad || !len) return out
+  const p = out[len - 1]
+  if (p >= 1 && p <= 16 && out.subarray(len - p).every((b) => b === p)) return out.slice(0, len - p)
+  return out
+}
+
+// ---------- SHA-2 (FIPS 180-4) — 256 / 384 / 512 ----------
+
+const K256 = Uint32Array.from([
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+])
+
+const shaPad = (data, blockLen) => {
+  const lenBytes = blockLen === 64 ? 8 : 16
+  const total = Math.ceil((data.length + 1 + lenBytes) / blockLen) * blockLen
+  const buf = new Uint8Array(total)
+  buf.set(data)
+  buf[data.length] = 0x80
+  const bits = data.length * 8
+  const dv = new DataView(buf.buffer)
+  dv.setUint32(total - 4, bits >>> 0)
+  dv.setUint32(total - 8, Math.floor(bits / 2 ** 32))
+  return { buf, dv }
+}
+
+function sha256(data) {
+  const { buf, dv } = shaPad(data, 64)
+  const H = Uint32Array.from([0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19])
+  const W = new Uint32Array(64)
+  const rr = (x, n) => (x >>> n) | (x << (32 - n))
+  for (let o = 0; o < buf.length; o += 64) {
+    for (let i = 0; i < 16; i++) W[i] = dv.getUint32(o + 4 * i)
+    for (let i = 16; i < 64; i++) {
+      const s0 = rr(W[i - 15], 7) ^ rr(W[i - 15], 18) ^ (W[i - 15] >>> 3)
+      const s1 = rr(W[i - 2], 17) ^ rr(W[i - 2], 19) ^ (W[i - 2] >>> 10)
+      W[i] = (W[i - 16] + s0 + W[i - 7] + s1) >>> 0
+    }
+    let [a, b, c, d, e, f, g, h] = H
+    for (let i = 0; i < 64; i++) {
+      const t1 = (h + (rr(e, 6) ^ rr(e, 11) ^ rr(e, 25)) + ((e & f) ^ (~e & g)) + K256[i] + W[i]) >>> 0
+      const t2 = ((rr(a, 2) ^ rr(a, 13) ^ rr(a, 22)) + ((a & b) ^ (a & c) ^ (b & c))) >>> 0
+      h = g; g = f; f = e; e = (d + t1) >>> 0; d = c; c = b; b = a; a = (t1 + t2) >>> 0
+    }
+    H[0] += a; H[1] += b; H[2] += c; H[3] += d; H[4] += e; H[5] += f; H[6] += g; H[7] += h
+  }
+  const out = new Uint8Array(32)
+  const ov = new DataView(out.buffer)
+  H.forEach((v, i) => ov.setUint32(4 * i, v))
+  return out
+}
+
+// SHA-512 on (hi, lo) 32-bit pairs
+const hexPair = (x) => [parseInt(x.slice(0, 8), 16) >>> 0, parseInt(x.slice(8), 16) >>> 0]
+const K512 = [
+  '428a2f98d728ae22', '7137449123ef65cd', 'b5c0fbcfec4d3b2f', 'e9b5dba58189dbbc', '3956c25bf348b538', '59f111f1b605d019',
+  '923f82a4af194f9b', 'ab1c5ed5da6d8118', 'd807aa98a3030242', '12835b0145706fbe', '243185be4ee4b28c', '550c7dc3d5ffb4e2',
+  '72be5d74f27b896f', '80deb1fe3b1696b1', '9bdc06a725c71235', 'c19bf174cf692694', 'e49b69c19ef14ad2', 'efbe4786384f25e3',
+  '0fc19dc68b8cd5b5', '240ca1cc77ac9c65', '2de92c6f592b0275', '4a7484aa6ea6e483', '5cb0a9dcbd41fbd4', '76f988da831153b5',
+  '983e5152ee66dfab', 'a831c66d2db43210', 'b00327c898fb213f', 'bf597fc7beef0ee4', 'c6e00bf33da88fc2', 'd5a79147930aa725',
+  '06ca6351e003826f', '142929670a0e6e70', '27b70a8546d22ffc', '2e1b21385c26c926', '4d2c6dfc5ac42aed', '53380d139d95b3df',
+  '650a73548baf63de', '766a0abb3c77b2a8', '81c2c92e47edaee6', '92722c851482353b', 'a2bfe8a14cf10364', 'a81a664bbc423001',
+  'c24b8b70d0f89791', 'c76c51a30654be30', 'd192e819d6ef5218', 'd69906245565a910', 'f40e35855771202a', '106aa07032bbd1b8',
+  '19a4c116b8d2d0c8', '1e376c085141ab53', '2748774cdf8eeb99', '34b0bcb5e19b48a8', '391c0cb3c5c95a63', '4ed8aa4ae3418acb',
+  '5b9cca4f7763e373', '682e6ff3d6b2b8a3', '748f82ee5defb2fc', '78a5636f43172f60', '84c87814a1f0ab72', '8cc702081a6439ec',
+  '90befffa23631e28', 'a4506cebde82bde9', 'bef9a3f7b2c67915', 'c67178f2e372532b', 'ca273eceea26619c', 'd186b8c721c0c207',
+  'eada7dd6cde0eb1e', 'f57d4f7fee6ed178', '06f067aa72176fba', '0a637dc5a2c898a6', '113f9804bef90dae', '1b710b35131c471b',
+  '28db77f523047d84', '32caab7b40c72493', '3c9ebe0a15c9bebc', '431d67c49c100d4c', '4cc5d4becb3e42b6', '597f299cfc657e2a',
+  '5fcb6fab3ad6faec', '6c44198c4a475817',
+].map(hexPair)
+const IV512 = ['6a09e667f3bcc908', 'bb67ae8584caa73b', '3c6ef372fe94f82b', 'a54ff53a5f1d36f1', '510e527fade682d1', '9b05688c2b3e6c1f', '1f83d9abfb41bd6b', '5be0cd19137e2179'].map(hexPair)
+const IV384 = ['cbbb9d5dc1059ed8', '629a292a367cd507', '9159015a3070dd17', '152fecd8f70e5939', '67332667ffc00b31', '8eb44a8768581511', 'db0c2e0d64f98fa7', '47b5481dbefa4fa4'].map(hexPair)
+
+function sha512core(data, iv, outLen) {
+  const { buf, dv } = shaPad(data, 128)
+  const H = iv.map((x) => [...x])
+  const Wh = new Uint32Array(80), Wl = new Uint32Array(80)
+  const rotr = (h, l, n) => (n < 32
+    ? [((h >>> n) | (l << (32 - n))) >>> 0, ((l >>> n) | (h << (32 - n))) >>> 0]
+    : [((l >>> (n - 32)) | (h << (64 - n))) >>> 0, ((h >>> (n - 32)) | (l << (64 - n))) >>> 0])
+  const shr = (h, l, n) => [h >>> n, ((l >>> n) | (h << (32 - n))) >>> 0]
+  const add = (...ps) => {
+    let lo = 0, hi = 0
+    for (const [ph, pl] of ps) { lo += pl; hi += ph }
+    hi += Math.floor(lo / 4294967296)
+    return [hi >>> 0, lo >>> 0]
+  }
+  const x3 = (a, b, c) => [(a[0] ^ b[0] ^ c[0]) >>> 0, (a[1] ^ b[1] ^ c[1]) >>> 0]
+  for (let o = 0; o < buf.length; o += 128) {
+    for (let i = 0; i < 16; i++) { Wh[i] = dv.getUint32(o + 8 * i); Wl[i] = dv.getUint32(o + 8 * i + 4) }
+    for (let i = 16; i < 80; i++) {
+      const s0 = x3(rotr(Wh[i - 15], Wl[i - 15], 1), rotr(Wh[i - 15], Wl[i - 15], 8), shr(Wh[i - 15], Wl[i - 15], 7))
+      const s1 = x3(rotr(Wh[i - 2], Wl[i - 2], 19), rotr(Wh[i - 2], Wl[i - 2], 61), shr(Wh[i - 2], Wl[i - 2], 6))
+      const r = add([Wh[i - 16], Wl[i - 16]], s0, [Wh[i - 7], Wl[i - 7]], s1)
+      Wh[i] = r[0]; Wl[i] = r[1]
+    }
+    let [a, b, c, d, e, f, g, h] = H.map((x) => [...x])
+    for (let i = 0; i < 80; i++) {
+      const S1 = x3(rotr(e[0], e[1], 14), rotr(e[0], e[1], 18), rotr(e[0], e[1], 41))
+      const ch = [((e[0] & f[0]) ^ (~e[0] & g[0])) >>> 0, ((e[1] & f[1]) ^ (~e[1] & g[1])) >>> 0]
+      const t1 = add(h, S1, ch, K512[i], [Wh[i], Wl[i]])
+      const S0 = x3(rotr(a[0], a[1], 28), rotr(a[0], a[1], 34), rotr(a[0], a[1], 39))
+      const maj = [((a[0] & b[0]) ^ (a[0] & c[0]) ^ (b[0] & c[0])) >>> 0, ((a[1] & b[1]) ^ (a[1] & c[1]) ^ (b[1] & c[1])) >>> 0]
+      const t2 = add(S0, maj)
+      h = g; g = f; f = e; e = add(d, t1); d = c; c = b; b = a; a = add(t1, t2)
+    }
+    ;[a, b, c, d, e, f, g, h].forEach((v, i) => { H[i] = add(H[i], v) })
+  }
+  const out = new Uint8Array(64)
+  const ov = new DataView(out.buffer)
+  H.forEach(([hh, ll], i) => { ov.setUint32(8 * i, hh); ov.setUint32(8 * i + 4, ll) })
+  return out.slice(0, outLen)
+}
+const sha512 = (data) => sha512core(data, IV512, 64)
+const sha384 = (data) => sha512core(data, IV384, 48)
+
+// ---- src/pdf/filters.js ----
+// Stream filter decoders — everything a PDF can wrap a stream in, except the
+// image codecs (DCT/JPX/JBIG2/CCITT), which callers handle or skip.
+
+/** ASCII85Decode — 4 bytes per 5 chars, 'z' = four zero bytes, '~>' ends. */
+function ascii85(data) {
+  const out = []
+  let tuple = 0
+  let n = 0
+  for (let i = 0; i < data.length; i++) {
+    const c = data[i]
+    if (c === 0x7e) break // '~>' EOD
+    if (c <= 0x20) continue // whitespace
+    if (c === 0x7a && n === 0) { out.push(0, 0, 0, 0); continue } // 'z'
+    if (c < 0x21 || c > 0x75) throw new Error('bad ASCII85 data')
+    tuple = tuple * 85 + (c - 0x21)
+    if (++n === 5) {
+      out.push((tuple >>> 24) & 255, (tuple >>> 16) & 255, (tuple >>> 8) & 255, tuple & 255)
+      tuple = 0
+      n = 0
+    }
+  }
+  if (n > 1) { // partial group: pad with 'u', keep n-1 bytes
+    for (let k = n; k < 5; k++) tuple = tuple * 85 + 84
+    const b = [(tuple >>> 24) & 255, (tuple >>> 16) & 255, (tuple >>> 8) & 255, tuple & 255]
+    out.push(...b.slice(0, n - 1))
+  }
+  return new Uint8Array(out)
+}
+
+/** ASCIIHexDecode — hex pairs, whitespace ignored, '>' ends, odd tail pads 0. */
+function asciiHex(data) {
+  const out = []
+  let hi = -1
+  for (let i = 0; i < data.length; i++) {
+    const c = data[i]
+    if (c === 0x3e) break
+    const v = c >= 0x30 && c <= 0x39 ? c - 0x30 : c >= 0x41 && c <= 0x46 ? c - 55 : c >= 0x61 && c <= 0x66 ? c - 87 : -1
+    if (v < 0) continue
+    if (hi < 0) hi = v
+    else { out.push(hi * 16 + v); hi = -1 }
+  }
+  if (hi >= 0) out.push(hi * 16)
+  return new Uint8Array(out)
+}
+
+/** RunLengthDecode — len byte 0-127 copies len+1 literals, 129-255 repeats next byte 257-len times. */
+function runLength(data) {
+  const out = []
+  for (let i = 0; i < data.length;) {
+    const len = data[i++]
+    if (len === 128) break
+    if (len < 128) { for (let k = 0; k <= len && i < data.length; k++) out.push(data[i++]) }
+    else { const b = data[i++]; for (let k = 0; k < 257 - len; k++) out.push(b) }
+  }
+  return new Uint8Array(out)
+}
+
+/** LZWDecode — 9..12-bit codes, 256 clear, 257 EOD; earlyChange per spec default 1. */
+function lzw(data, earlyChange = 1) {
+  const out = []
+  let dict = []
+  const reset = () => {
+    dict = []
+    for (let i = 0; i < 256; i++) dict.push([i])
+    dict.push(null, null) // 256 clear, 257 eod
+  }
+  reset()
+  let bits = 9
+  let buf = 0
+  let nbuf = 0
+  let prev = null
+  for (let i = 0; i < data.length; i++) {
+    buf = (buf << 8) | data[i]
+    nbuf += 8
+    while (nbuf >= bits) {
+      const code = (buf >>> (nbuf - bits)) & ((1 << bits) - 1)
+      nbuf -= bits
+      buf &= (1 << nbuf) - 1
+      if (code === 256) { reset(); bits = 9; prev = null; continue }
+      if (code === 257) return new Uint8Array(out)
+      let entry
+      if (code < dict.length && dict[code]) entry = dict[code]
+      else if (prev && code === dict.length) entry = [...prev, prev[0]]
+      else throw new Error('bad LZW code')
+      for (const b of entry) out.push(b)
+      if (prev) dict.push([...prev, entry[0]])
+      prev = entry
+      if (dict.length + earlyChange >= 1 << bits && bits < 12) bits++
+    }
+  }
+  return new Uint8Array(out)
+}
+
+/** Undo PNG/TIFF predictors (DecodeParms /Predictor). */
+function unPredict(data, { predictor = 1, columns = 1, colors = 1, bpc = 8 }) {
+  if (predictor === 1) return data
+  const bpp = Math.max(1, Math.ceil((colors * bpc) / 8))
+  const rowBytes = Math.ceil((columns * colors * bpc) / 8)
+  if (predictor === 2) {
+    const out = new Uint8Array(data.length)
+    for (let y = 0; y * rowBytes < data.length; y++) {
+      const row = y * rowBytes
+      for (let x = 0; x < rowBytes; x++) {
+        const left = x >= bpp ? out[row + x - bpp] : 0
+        out[row + x] = (data[row + x] + left) & 0xff
+      }
+    }
+    return out
+  }
+  if (predictor < 10 || predictor > 15) throw new Error(`unsupported predictor ${predictor}`)
+  const rowStride = rowBytes + 1
+  const rows = Math.floor(data.length / rowStride)
+  const out = new Uint8Array(rows * rowBytes)
+  const paeth = (a, b, c) => {
+    const p = a + b - c
+    const pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c)
+    return pa <= pb && pa <= pc ? a : pb <= pc ? b : c
+  }
+  for (let y = 0; y < rows; y++) {
+    const src = y * rowStride + 1
+    const f = data[y * rowStride]
+    const prev = y > 0 ? (y - 1) * rowBytes : -1
+    for (let x = 0; x < rowBytes; x++) {
+      const a = x >= bpp ? out[y * rowBytes + x - bpp] : 0
+      const b = prev >= 0 ? out[prev + x] : 0
+      const c = x >= bpp && prev >= 0 ? out[prev + x - bpp] : 0
+      let v = data[src + x]
+      if (f === 1) v += a
+      else if (f === 2) v += b
+      else if (f === 3) v += (a + b) >> 1
+      else if (f === 4) v += paeth(a, b, c)
+      out[y * rowBytes + x] = v & 0xff
+    }
+  }
+  return out
+}
+
+const FILTER_ALIAS = { AHx: 'ASCIIHexDecode', A85: 'ASCII85Decode', LZW: 'LZWDecode', Fl: 'FlateDecode', RL: 'RunLengthDecode', DCT: 'DCTDecode', CCF: 'CCITTFaxDecode' }
+const IMAGE_CODECS = new Set(['DCTDecode', 'JPXDecode', 'JBIG2Decode', 'CCITTFaxDecode'])
+
+/** Normalised [{name, parms: Map|null}] chain for a stream dict. */
+function filterChain(dict) {
+  const g = (k) => (dict instanceof Map ? dict.get(k) : undefined)
+  const f = g('Filter') ?? g('F')
+  const p = g('DecodeParms') ?? g('DP')
+  const names = Array.isArray(f) ? f : f ? [f] : []
+  const parms = Array.isArray(p) ? p : [p]
+  return names.map((n, i) => {
+    const nm = n?.k === 'n' ? n.v : null
+    return { name: FILTER_ALIAS[nm] ?? nm, parms: parms[i] instanceof Map ? parms[i] : null }
+  })
+}
+
+const predictParms = (parms) => {
+  if (!parms) return null
+  const pr = parms.get('Predictor') ?? 1
+  if (pr === 1) return null
+  return {
+    predictor: pr,
+    columns: parms.get('Columns') ?? 1,
+    colors: parms.get('Colors') ?? 1,
+    bpc: parms.get('BitsPerComponent') ?? 8,
+  }
+}
+
+/** Apply one non-image filter. */
+async function applyFilter(name, parms, d) {
+  if (name === 'FlateDecode') {
+    d = await inflate(d)
+  } else if (name === 'LZWDecode') {
+    d = lzw(d, parms?.get('EarlyChange') ?? 1)
+  } else if (name === 'ASCII85Decode') return ascii85(d)
+  else if (name === 'ASCIIHexDecode') return asciiHex(d)
+  else if (name === 'RunLengthDecode') return runLength(d)
+  else if (name === 'Crypt') return d // Identity crypt filter
+  else throw new Error(`unsupported filter ${name}`)
+  const pp = predictParms(parms)
+  return pp ? unPredict(d, pp) : d
+}
+
+/**
+ * Decode a stream's data through its filter chain.
+ * stopAtImage: stop (without error) at a trailing image codec and report it.
+ * Returns {data, codec, parms} — codec null when fully decoded.
+ */
+async function decodeChain(dict, data, { stopAtImage = false } = {}) {
+  const chain = filterChain(dict)
+  let d = data
+  for (let i = 0; i < chain.length; i++) {
+    const { name, parms } = chain[i]
+    if (IMAGE_CODECS.has(name)) {
+      if (stopAtImage) return { data: d, codec: name, parms }
+      throw new Error(`image codec ${name}`)
+    }
+    d = await applyFilter(name, parms, d)
+  }
+  return { data: d, codec: null, parms: null }
+}
+
 // ---- src/pdf/parse.js ----
 
 const WS = new Set([0x00, 0x09, 0x0a, 0x0c, 0x0d, 0x20])
@@ -619,9 +1058,9 @@ function parseValue(buf, i, allowStream = false) {
             const e = skipWs(buf, i)
             if (matchKeyword(buf, e, 'endstream')) i = e + 9
           } else {
-            const end = findMarker(buf, d, 'endstream')
+            const { end, at } = findMarker(buf, d, 'endstream')
             data = buf.slice(d, end)
-            i = end + 9
+            i = at + 9
           }
           return [stream(dict, data), i]
         }
@@ -751,9 +1190,9 @@ function findMarker(buf, from, marker) {
     let end = i
     if (buf[end - 1] === 0x0a) end--
     if (buf[end - 1] === 0x0d) end--
-    return end
+    return { end, at: i }
   }
-  return buf.length
+  return { end: buf.length, at: buf.length }
 }
 
 const OBJ_RE = /(\d+)\s+(\d+)\s+obj\b/g
@@ -787,7 +1226,7 @@ async function parsePdf(bytes, warnings = [], allowEncrypted = false) {
     const first = get(v.dict, 'First')
     if (typeof N !== 'number' || typeof first !== 'number') continue
     try {
-      const data = await inflate(v.data)
+      const { data } = await decodeChain(v.dict, v.data)
       const headerEnd = first
       const header = dec(data.slice(0, headerEnd)).trim().split(/\s+/).map(Number)
       for (let i = 0; i < N; i++) {
@@ -883,6 +1322,547 @@ function writeDoc(doc, rootNum, trailerExtra) {
     enc(`\nstartxref\n${xrefAt}\n%%EOF\n`),
   )
   return concat(parts)
+}
+
+// ---- src/pdf/encodings.js ----
+// Simple-font encodings: base encodings (WinAnsi / MacRoman / Standard) and an
+// Adobe-Glyph-List subset, so /Differences glyph names decode to real text
+// (ligatures, smart quotes, dashes, accents) instead of raw Latin-1 bytes.
+
+// WinAnsi = Latin-1 except 0x80–0x9F
+const WIN_HI = {
+  0x80: 0x20ac, 0x82: 0x201a, 0x83: 0x0192, 0x84: 0x201e, 0x85: 0x2026, 0x86: 0x2020, 0x87: 0x2021,
+  0x88: 0x02c6, 0x89: 0x2030, 0x8a: 0x0160, 0x8b: 0x2039, 0x8c: 0x0152, 0x8e: 0x017d,
+  0x91: 0x2018, 0x92: 0x2019, 0x93: 0x201c, 0x94: 0x201d, 0x95: 0x2022, 0x96: 0x2013, 0x97: 0x2014,
+  0x98: 0x02dc, 0x99: 0x2122, 0x9a: 0x0161, 0x9b: 0x203a, 0x9c: 0x0153, 0x9e: 0x017e, 0x9f: 0x0178,
+}
+const WIN_ANSI = Array.from({ length: 256 }, (_, i) => WIN_HI[i] ?? (i >= 0x20 && (i < 0x7f || i > 0x9f) ? i : 0))
+
+// Unicode → WinAnsi byte (for writing text with the standard 14 fonts)
+const UNI_TO_WIN = new Map(WIN_ANSI.map((u, i) => [u, i]).filter(([u, i]) => u && i >= 0x20))
+
+const MAC_HI = [
+  0xc4, 0xc5, 0xc7, 0xc9, 0xd1, 0xd6, 0xdc, 0xe1, 0xe0, 0xe2, 0xe4, 0xe3, 0xe5, 0xe7, 0xe9, 0xe8,
+  0xea, 0xeb, 0xed, 0xec, 0xee, 0xef, 0xf1, 0xf3, 0xf2, 0xf4, 0xf6, 0xf5, 0xfa, 0xf9, 0xfb, 0xfc,
+  0x2020, 0xb0, 0xa2, 0xa3, 0xa7, 0x2022, 0xb6, 0xdf, 0xae, 0xa9, 0x2122, 0xb4, 0xa8, 0x2260, 0xc6, 0xd8,
+  0x221e, 0xb1, 0x2264, 0x2265, 0xa5, 0xb5, 0x2202, 0x2211, 0x220f, 0x3c0, 0x222b, 0xaa, 0xba, 0x3a9, 0xe6, 0xf8,
+  0xbf, 0xa1, 0xac, 0x221a, 0x192, 0x2248, 0x2206, 0xab, 0xbb, 0x2026, 0xa0, 0xc0, 0xc3, 0xd5, 0x152, 0x153,
+  0x2013, 0x2014, 0x201c, 0x201d, 0x2018, 0x2019, 0xf7, 0x25ca, 0xff, 0x178, 0x2044, 0x20ac, 0x2039, 0x203a, 0xfb01, 0xfb02,
+  0x2021, 0xb7, 0x201a, 0x201e, 0x2030, 0xc2, 0xca, 0xc1, 0xcb, 0xc8, 0xcd, 0xce, 0xcf, 0xcc, 0xd3, 0xd4,
+  0xf8ff, 0xd2, 0xda, 0xdb, 0xd9, 0x131, 0x2c6, 0x2dc, 0xaf, 0x2d8, 0x2d9, 0x2da, 0xb8, 0x2dd, 0x2db, 0x2c7,
+]
+const MAC_ROMAN = Array.from({ length: 256 }, (_, i) => (i >= 0x80 ? MAC_HI[i - 0x80] : i >= 0x20 ? i : 0))
+
+// StandardEncoding differs from ASCII at quotes + a high-half of named glyphs
+const STD_HI = {
+  0x27: 0x2019, 0x60: 0x2018, 0xa1: 0xa1, 0xa2: 0xa2, 0xa3: 0xa3, 0xa4: 0x2044, 0xa5: 0xa5, 0xa6: 0x192,
+  0xa7: 0xa7, 0xa8: 0xa4, 0xa9: 0x27, 0xaa: 0x201c, 0xab: 0xab, 0xac: 0x2039, 0xad: 0x203a, 0xae: 0xfb01,
+  0xaf: 0xfb02, 0xb1: 0x2013, 0xb2: 0x2020, 0xb3: 0x2021, 0xb4: 0xb7, 0xb6: 0xb6, 0xb7: 0x2022, 0xb8: 0x201a,
+  0xb9: 0x201e, 0xba: 0x201d, 0xbb: 0xbb, 0xbc: 0x2026, 0xbd: 0x2030, 0xbf: 0xbf, 0xc1: 0x60, 0xc2: 0xb4,
+  0xc3: 0x2c6, 0xc4: 0x2dc, 0xc5: 0xaf, 0xc6: 0x2d8, 0xc7: 0x2d9, 0xc8: 0xa8, 0xca: 0x2da, 0xcb: 0xb8,
+  0xcd: 0x2dd, 0xce: 0x2db, 0xcf: 0x2c7, 0xd0: 0x2014, 0xe1: 0xc6, 0xe3: 0xaa, 0xe8: 0x141, 0xe9: 0xd8,
+  0xea: 0x152, 0xeb: 0xba, 0xf1: 0xe6, 0xf5: 0x131, 0xf8: 0x142, 0xf9: 0xf8, 0xfa: 0x153, 0xfb: 0xdf,
+}
+const STANDARD = Array.from({ length: 256 }, (_, i) => STD_HI[i] ?? (i >= 0x20 && i < 0x7f ? i : 0))
+
+// Adobe Glyph List subset — names that actually show up in /Differences
+const AGL = {
+  space: 32, exclam: 33, quotedbl: 34, numbersign: 35, dollar: 36, percent: 37, ampersand: 38,
+  quotesingle: 39, quoteright: 0x2019, parenleft: 40, parenright: 41, asterisk: 42, plus: 43, comma: 44,
+  hyphen: 45, minus: 0x2212, period: 46, slash: 47, zero: 48, one: 49, two: 50, three: 51, four: 52,
+  five: 53, six: 54, seven: 55, eight: 56, nine: 57, colon: 58, semicolon: 59, less: 60, equal: 61,
+  greater: 62, question: 63, at: 64, bracketleft: 91, backslash: 92, bracketright: 93, asciicircum: 94,
+  underscore: 95, grave: 96, quoteleft: 0x2018, braceleft: 123, bar: 124, braceright: 125, asciitilde: 126,
+  exclamdown: 0xa1, cent: 0xa2, sterling: 0xa3, currency: 0xa4, yen: 0xa5, brokenbar: 0xa6, section: 0xa7,
+  dieresis: 0xa8, copyright: 0xa9, ordfeminine: 0xaa, guillemotleft: 0xab, logicalnot: 0xac, registered: 0xae,
+  macron: 0xaf, degree: 0xb0, plusminus: 0xb1, twosuperior: 0xb2, threesuperior: 0xb3, acute: 0xb4, mu: 0xb5,
+  paragraph: 0xb6, periodcentered: 0xb7, cedilla: 0xb8, onesuperior: 0xb9, ordmasculine: 0xba,
+  guillemotright: 0xbb, onequarter: 0xbc, onehalf: 0xbd, threequarters: 0xbe, questiondown: 0xbf,
+  multiply: 0xd7, divide: 0xf7, germandbls: 0xdf, AE: 0xc6, ae: 0xe6, OE: 0x152, oe: 0x153, Oslash: 0xd8,
+  oslash: 0xf8, Lslash: 0x141, lslash: 0x142, dotlessi: 0x131, Eth: 0xd0, eth: 0xf0, Thorn: 0xde, thorn: 0xfe,
+  fi: 0xfb01, fl: 0xfb02, ff: 0xfb00, ffi: 0xfb03, ffl: 0xfb04,
+  endash: 0x2013, emdash: 0x2014, bullet: 0x2022, ellipsis: 0x2026, dagger: 0x2020, daggerdbl: 0x2021,
+  quotedblleft: 0x201c, quotedblright: 0x201d, quotesinglbase: 0x201a, quotedblbase: 0x201e,
+  guilsinglleft: 0x2039, guilsinglright: 0x203a, perthousand: 0x2030, trademark: 0x2122, Euro: 0x20ac,
+  florin: 0x192, fraction: 0x2044, circumflex: 0x2c6, tilde: 0x2dc, breve: 0x2d8, dotaccent: 0x2d9,
+  ring: 0x2da, hungarumlaut: 0x2dd, ogonek: 0x2db, caron: 0x2c7, nbspace: 0xa0, uni00A0: 0xa0,
+  sfthyphen: 0xad, arrowright: 0x2192, arrowleft: 0x2190, arrowup: 0x2191, arrowdown: 0x2193,
+  infinity: 0x221e, lessequal: 0x2264, greaterequal: 0x2265, notequal: 0x2260, approxequal: 0x2248,
+  partialdiff: 0x2202, summation: 0x2211, product: 0x220f, radical: 0x221a, integral: 0x222b,
+  Delta: 0x394, Omega: 0x3a9, pi: 0x3c0, alpha: 0x3b1, beta: 0x3b2, gamma: 0x3b3, delta: 0x3b4,
+  epsilon: 0x3b5, lambda: 0x3bb, sigma: 0x3c3, theta: 0x3b8, lozenge: 0x25ca, checkmark: 0x2713,
+}
+// accented Latin letters: base letter + accent name → precomposed code point
+const ACCENTS = { grave: 0x300, acute: 0x301, circumflex: 0x302, tilde: 0x303, dieresis: 0x308, ring: 0x30a, cedilla: 0x327, caron: 0x30c }
+const RE_UNI = /^uni([0-9A-Fa-f]{4,})$/
+const RE_U = /^u([0-9A-Fa-f]{4,6})$/
+const RE_ACC = /^([A-Za-z])(grave|acute|circumflex|tilde|dieresis|ring|cedilla|caron)$/
+
+/** Glyph name → Unicode string ('' when unknown). */
+function glyphToUnicode(gname) {
+  if (!gname) return ''
+  if (AGL[gname] !== undefined) return String.fromCodePoint(AGL[gname])
+  if (gname.length === 1 && /[A-Za-z]/.test(gname)) return gname
+  let m = gname.match(RE_UNI)
+  if (m) {
+    let s = ''
+    for (let i = 0; i + 4 <= m[1].length; i += 4) s += String.fromCodePoint(parseInt(m[1].slice(i, i + 4), 16))
+    return s
+  }
+  m = gname.match(RE_U)
+  if (m) return String.fromCodePoint(parseInt(m[1], 16))
+  m = gname.match(RE_ACC)
+  if (m) return (m[1] + String.fromCodePoint(ACCENTS[m[2]])).normalize('NFC')
+  const dot = gname.indexOf('.') // "a.sc", "one.oldstyle" → base glyph
+  if (dot > 0) return glyphToUnicode(gname.slice(0, dot))
+  const us = gname.indexOf('_') // "f_i" ligature names
+  if (us > 0) return gname.split('_').map(glyphToUnicode).join('')
+  return ''
+}
+
+/**
+ * Build a 256-entry code → string table for a simple font's /Encoding.
+ * enc: Name | Dict (BaseEncoding + Differences) | undefined. Symbolic fonts
+ * without a base encoding keep identity bytes.
+ */
+function simpleEncodingTable(enc, { symbolic = false } = {}) {
+  const nm = (v) => (v?.k === 'n' ? v.v : null)
+  let baseName = nm(enc)
+  let diffs = null
+  if (enc instanceof Map) {
+    baseName = nm(enc.get('BaseEncoding'))
+    diffs = enc.get('Differences')
+  }
+  const base = baseName === 'MacRomanEncoding' ? MAC_ROMAN
+    : baseName === 'WinAnsiEncoding' ? WIN_ANSI
+    : baseName === 'StandardEncoding' ? STANDARD
+    : symbolic ? null : WIN_ANSI // spec says Standard, but WinAnsi ⊇ ASCII and matches real files better
+  const table = Array.from({ length: 256 }, (_, i) => (base ? (base[i] ? String.fromCodePoint(base[i]) : '') : String.fromCharCode(i)))
+  if (Array.isArray(diffs)) {
+    let code = 0
+    for (const d of diffs) {
+      if (typeof d === 'number') code = d
+      else if (d?.k === 'n') {
+        if (code < 256) {
+          const u = glyphToUnicode(d.v)
+          if (u) table[code] = u
+        }
+        code++
+      }
+    }
+  }
+  return table
+}
+
+/** Unicode string → WinAnsi bytes for the standard-14 fonts (null if any char is unmappable). */
+function toWinAnsi(s) {
+  const out = []
+  for (const ch of s) {
+    const b = UNI_TO_WIN.get(ch.codePointAt(0))
+    if (b === undefined) return null
+    out.push(b)
+  }
+  return new Uint8Array(out)
+}
+
+// ---- src/pdf/functions.js ----
+// PDF function objects (types 0, 2, 3, 4) → plain JS (inputs[]) => outputs[].
+// Used by Separation/DeviceN tint transforms and shadings.
+
+const clampTo = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v)
+const dictOf = (v) => (v?.k === 't' ? v.dict : v)
+
+/** Compile a function object. Returns null when it can't be understood. */
+async function compileFunction(doc, fnObj) {
+  if (Array.isArray(fnObj)) { // array of 1-out functions → one n-out function
+    const fs = []
+    for (const f of fnObj) fs.push(await compileFunction(doc, deref(doc, f)))
+    if (fs.some((f) => !f)) return null
+    return (x) => fs.map((f) => f(x)[0])
+  }
+  fnObj = deref(doc, fnObj)
+  const d = dictOf(fnObj)
+  if (!(d instanceof Map)) return null
+  const type = d.get('FunctionType')
+  const domain = d.get('Domain') ?? [0, 1]
+  const range = d.get('Range') ?? null
+  const clampIn = (x) => x.map((v, i) => clampTo(v, domain[2 * i] ?? 0, domain[2 * i + 1] ?? 1))
+  const clampOut = (y) => (range ? y.map((v, i) => clampTo(v, range[2 * i], range[2 * i + 1])) : y)
+
+  if (type === 2) {
+    const c0 = d.get('C0') ?? [0]
+    const c1 = d.get('C1') ?? [1]
+    const N = d.get('N') ?? 1
+    return (x) => {
+      const t = clampIn(x)[0] ** N
+      return clampOut(c0.map((a, i) => a + t * ((c1[i] ?? 1) - a)))
+    }
+  }
+  if (type === 3) {
+    const fns = []
+    for (const f of d.get('Functions') ?? []) fns.push(await compileFunction(doc, deref(doc, f)))
+    if (fns.some((f) => !f)) return null
+    const bounds = d.get('Bounds') ?? []
+    const encode = d.get('Encode') ?? []
+    return (x) => {
+      const v = clampIn(x)[0]
+      let k = 0
+      while (k < bounds.length && v >= bounds[k]) k++
+      const lo = k === 0 ? domain[0] : bounds[k - 1]
+      const hi = k === bounds.length ? domain[1] : bounds[k]
+      const e0 = encode[2 * k] ?? 0, e1 = encode[2 * k + 1] ?? 1
+      const t = hi === lo ? e0 : e0 + ((v - lo) * (e1 - e0)) / (hi - lo)
+      return clampOut(fns[k]([t]))
+    }
+  }
+  if (type === 0 && fnObj.k === 't') {
+    const { data } = await decodeChain(d, fnObj.data)
+    const size = d.get('Size') ?? [2]
+    const bps = d.get('BitsPerSample') ?? 8
+    const nOut = (range?.length ?? 2) / 2
+    const encode = d.get('Encode') ?? size.flatMap((s) => [0, s - 1])
+    const decode = d.get('Decode') ?? range
+    const max = 2 ** bps - 1
+    const sample = (idx) => { // idx = flat sample index
+      const out = []
+      for (let o = 0; o < nOut; o++) {
+        const bit = (idx * nOut + o) * bps
+        let v = 0
+        if (bps === 8) v = data[bit >> 3]
+        else if (bps === 16) v = (data[bit >> 3] << 8) | data[(bit >> 3) + 1]
+        else if (bps === 32) v = ((data[bit >> 3] << 24) | (data[(bit >> 3) + 1] << 16) | (data[(bit >> 3) + 2] << 8) | data[(bit >> 3) + 3]) >>> 0
+        else { for (let b = 0; b < bps; b++) v = (v << 1) | ((data[(bit + b) >> 3] >> (7 - ((bit + b) & 7))) & 1) }
+        out.push((decode[2 * o] ?? 0) + ((v ?? 0) * ((decode[2 * o + 1] ?? 1) - (decode[2 * o] ?? 0))) / max)
+      }
+      return out
+    }
+    return (x) => {
+      x = clampIn(x)
+      // multilinear would be nicer; nearest-sample is plenty for tints/shading
+      let idx = 0, stride = 1
+      for (let i = 0; i < size.length; i++) {
+        const e = (encode[2 * i] ?? 0) + ((x[i] - (domain[2 * i] ?? 0)) * ((encode[2 * i + 1] ?? size[i] - 1) - (encode[2 * i] ?? 0))) / (((domain[2 * i + 1] ?? 1) - (domain[2 * i] ?? 0)) || 1)
+        idx += clampTo(Math.round(e), 0, size[i] - 1) * stride
+        stride *= size[i]
+      }
+      return clampOut(sample(idx))
+    }
+  }
+  if (type === 4 && fnObj.k === 't') {
+    const { data } = await decodeChain(d, fnObj.data)
+    const prog = parsePostScript(new TextDecoder('latin1').decode(data))
+    if (!prog) return null
+    return (x) => {
+      const st = [...clampIn(x)]
+      try { runPS(prog, st) } catch { return range ? range.filter((_, i) => i % 2 === 0) : [0] }
+      const n = range ? range.length / 2 : st.length
+      return clampOut(st.slice(st.length - n))
+    }
+  }
+  return null
+}
+
+/** Tokenise a type-4 calculator program → nested arrays (procs) of tokens. */
+function parsePostScript(src) {
+  const toks = src.match(/[{}]|[^\s{}]+/g) ?? []
+  let i = 0
+  const proc = () => {
+    const out = []
+    while (i < toks.length) {
+      const t = toks[i++]
+      if (t === '{') out.push(proc())
+      else if (t === '}') return out
+      else out.push(/^[-+.\d]/.test(t) ? Number(t) : t)
+    }
+    return out
+  }
+  if (toks[i] !== '{') return null
+  i++
+  return proc()
+}
+
+function runPS(prog, s) {
+  for (let i = 0; i < prog.length; i++) {
+    const t = prog[i]
+    if (typeof t === 'number' || Array.isArray(t)) { s.push(t); continue }
+    let a, b
+    switch (t) {
+      case 'add': b = s.pop(); a = s.pop(); s.push(a + b); break
+      case 'sub': b = s.pop(); a = s.pop(); s.push(a - b); break
+      case 'mul': b = s.pop(); a = s.pop(); s.push(a * b); break
+      case 'div': b = s.pop(); a = s.pop(); s.push(b ? a / b : 0); break
+      case 'idiv': b = s.pop(); a = s.pop(); s.push(b ? Math.trunc(a / b) : 0); break
+      case 'mod': b = s.pop(); a = s.pop(); s.push(b ? a % b : 0); break
+      case 'neg': s.push(-s.pop()); break
+      case 'abs': s.push(Math.abs(s.pop())); break
+      case 'sqrt': s.push(Math.sqrt(Math.max(0, s.pop()))); break
+      case 'sin': s.push(Math.sin((s.pop() * Math.PI) / 180)); break
+      case 'cos': s.push(Math.cos((s.pop() * Math.PI) / 180)); break
+      case 'atan': b = s.pop(); a = s.pop(); s.push(((Math.atan2(a, b) * 180) / Math.PI + 360) % 360); break
+      case 'exp': b = s.pop(); a = s.pop(); s.push(a ** b); break
+      case 'ln': s.push(Math.log(s.pop())); break
+      case 'log': s.push(Math.log10(s.pop())); break
+      case 'floor': s.push(Math.floor(s.pop())); break
+      case 'ceiling': s.push(Math.ceil(s.pop())); break
+      case 'round': s.push(Math.round(s.pop())); break
+      case 'truncate': s.push(Math.trunc(s.pop())); break
+      case 'cvi': s.push(Math.trunc(s.pop())); break
+      case 'cvr': break
+      case 'dup': s.push(s[s.length - 1]); break
+      case 'pop': s.pop(); break
+      case 'exch': b = s.pop(); a = s.pop(); s.push(b, a); break
+      case 'copy': { const n = s.pop(); s.push(...s.slice(s.length - n)); break }
+      case 'index': { const n = s.pop(); s.push(s[s.length - 1 - n]); break }
+      case 'roll': {
+        let j = s.pop(); const n = s.pop()
+        if (n <= 0) break
+        const seg = s.splice(s.length - n, n)
+        j = ((j % n) + n) % n
+        s.push(...seg.slice(n - j), ...seg.slice(0, n - j))
+        break
+      }
+      case 'eq': b = s.pop(); a = s.pop(); s.push(a === b); break
+      case 'ne': b = s.pop(); a = s.pop(); s.push(a !== b); break
+      case 'gt': b = s.pop(); a = s.pop(); s.push(a > b); break
+      case 'ge': b = s.pop(); a = s.pop(); s.push(a >= b); break
+      case 'lt': b = s.pop(); a = s.pop(); s.push(a < b); break
+      case 'le': b = s.pop(); a = s.pop(); s.push(a <= b); break
+      case 'and': b = s.pop(); a = s.pop(); s.push(typeof a === 'boolean' ? a && b : a & b); break
+      case 'or': b = s.pop(); a = s.pop(); s.push(typeof a === 'boolean' ? a || b : a | b); break
+      case 'xor': b = s.pop(); a = s.pop(); s.push(typeof a === 'boolean' ? a !== b : a ^ b); break
+      case 'not': a = s.pop(); s.push(typeof a === 'boolean' ? !a : ~a); break
+      case 'bitshift': b = s.pop(); a = s.pop(); s.push(b >= 0 ? a << b : a >> -b); break
+      case 'true': s.push(true); break
+      case 'false': s.push(false); break
+      case 'if': { const p = s.pop(); if (s.pop()) runPS(p, s); break }
+      case 'ifelse': { const p2 = s.pop(); const p1 = s.pop(); runPS(s.pop() ? p1 : p2, s); break }
+      default: throw new Error(`ps op ${t}`)
+    }
+  }
+}
+
+// ---- src/pdf/image.js ----
+// Colour spaces + image XObject decoding to RGBA, pure JS (runs in node too).
+// DCT/JPX payloads are handed back undecoded — the browser owns those codecs.
+
+const nameOf = (v) => (v?.k === 'n' ? v.v : null)
+const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v)
+
+const cmykToRgb = (c, m, y, k) => [
+  (1 - c) * (1 - k), (1 - m) * (1 - k), (1 - y) * (1 - k),
+]
+const labToRgb = (L, a, b) => { // D65, sRGB gamma
+  let y = (L + 16) / 116, x = a / 500 + y, z = y - b / 200
+  const f = (t) => (t ** 3 > 0.008856 ? t ** 3 : (t - 16 / 116) / 7.787)
+  x = 0.95047 * f(x); y = f(y); z = 1.08883 * f(z)
+  const g = (c) => (c > 0.0031308 ? 1.055 * c ** (1 / 2.4) - 0.055 : 12.92 * c)
+  return [g(x * 3.2406 + y * -1.5372 + z * -0.4986), g(x * -0.9689 + y * 1.8758 + z * 0.0415), g(x * 0.0557 + y * -0.204 + z * 1.057)].map(clamp01)
+}
+
+/**
+ * Resolve a colour space → {n, name, toRGB(comps[0..1]) → [r,g,b] 0..1, indexed?, hival?}.
+ * Unknown spaces fall back by component count so something sensible paints.
+ */
+async function resolveColorSpace(doc, cs, res = null) {
+  cs = deref(doc, cs)
+  // named resource (/CS0) → look up in Resources /ColorSpace
+  const nm = nameOf(cs)
+  if (nm && !/^Device|^Pattern$/.test(nm) && res instanceof Map) {
+    let csd = deref(doc, res.get('ColorSpace'))
+    const inner = csd instanceof Map ? csd.get(nm) : undefined
+    if (inner !== undefined) return resolveColorSpace(doc, inner, null)
+  }
+  const fam = nm ?? (Array.isArray(cs) ? nameOf(deref(doc, cs[0])) : null)
+  const gray = { n: 1, name: 'DeviceGray', toRGB: (c) => [c[0], c[0], c[0]] }
+  const rgb = { n: 3, name: 'DeviceRGB', toRGB: (c) => [c[0], c[1], c[2]] }
+  const cmyk = { n: 4, name: 'DeviceCMYK', toRGB: (c) => cmykToRgb(c[0], c[1], c[2], c[3]) }
+  switch (fam) {
+    case 'DeviceGray': case 'G': case 'CalGray': return gray
+    case 'DeviceRGB': case 'RGB': case 'CalRGB': return rgb
+    case 'DeviceCMYK': case 'CMYK': return cmyk
+    case 'Lab': {
+      const d = deref(doc, cs[1])
+      const r = (d instanceof Map && d.get('Range')) || [-100, 100, -100, 100]
+      // components arrive normalised 0..1 over [0,100],[amin,amax],[bmin,bmax]
+      return { n: 3, name: 'Lab', toRGB: (c) => labToRgb(c[0] * 100, r[0] + c[1] * (r[1] - r[0]), r[2] + c[2] * (r[3] - r[2])), lab: r }
+    }
+    case 'ICCBased': {
+      const s = deref(doc, cs[1])
+      const d = s?.dict
+      const n = d?.get('N') ?? 3
+      const alt = d?.get('Alternate')
+      if (alt) {
+        const a = await resolveColorSpace(doc, alt).catch(() => null)
+        if (a && a.n === n) return { ...a, name: 'ICCBased' }
+      }
+      return { ...(n === 1 ? gray : n === 4 ? cmyk : rgb), name: 'ICCBased' }
+    }
+    case 'Indexed': case 'I': {
+      const base = await resolveColorSpace(doc, cs[1])
+      const hival = deref(doc, cs[2]) ?? 255
+      let lk = deref(doc, cs[3])
+      let bytes
+      if (lk?.k === 't') bytes = (await decodeChain(lk.dict, lk.data)).data
+      else if (lk?.bytes) bytes = lk.bytes
+      else bytes = new Uint8Array(0)
+      const palette = []
+      for (let i = 0; i <= hival; i++) {
+        const comps = []
+        for (let k = 0; k < base.n; k++) comps.push((bytes[i * base.n + k] ?? 0) / 255)
+        palette.push(base.toRGB(comps))
+      }
+      return { n: 1, name: 'Indexed', indexed: true, hival, toRGB: (c) => palette[Math.max(0, Math.min(hival, Math.round(c[0])))] ?? [0, 0, 0] }
+    }
+    case 'Separation': case 'DeviceN': {
+      const nIn = fam === 'Separation' ? 1 : (deref(doc, cs[1])?.length ?? 1)
+      const alt = await resolveColorSpace(doc, cs[2]).catch(() => gray)
+      const fn = await compileFunction(doc, cs[3]).catch(() => null)
+      const sepName = fam === 'Separation' ? nameOf(cs[1]) : null
+      if (sepName === 'None') return { n: 1, name: fam, none: true, toRGB: () => [1, 1, 1] }
+      return {
+        n: nIn, name: fam,
+        toRGB: fn ? (c) => alt.toRGB(fn(c)) : (c) => { const v = 1 - clamp01(c[0]); return [v, v, v] },
+      }
+    }
+    case 'Pattern': return { n: 0, name: 'Pattern', pattern: true, toRGB: () => [0.5, 0.5, 0.5] }
+    default:
+      return rgb
+  }
+}
+
+/** Read N samples of `bpc` bits from a row starting at byte `off`. */
+function readSamples(data, off, count, bpc, out) {
+  if (bpc === 8) { for (let i = 0; i < count; i++) out[i] = data[off + i] ?? 0; return }
+  if (bpc === 16) { for (let i = 0; i < count; i++) out[i] = ((data[off + 2 * i] ?? 0) << 8) | (data[off + 2 * i + 1] ?? 0); return }
+  const mask = (1 << bpc) - 1
+  for (let i = 0; i < count; i++) {
+    const bit = i * bpc
+    const byte = data[off + (bit >> 3)] ?? 0
+    out[i] = (byte >> (8 - bpc - (bit & 7))) & mask
+  }
+}
+
+/**
+ * Decode an image XObject (stream) → result:
+ *   {kind:'rgba', w, h, rgba: Uint8ClampedArray}           raw samples, fully decoded
+ *   {kind:'jpeg'|'jpx', w, h, data, smask?: rgba-alpha-plane|null, cmyk?: bool}
+ *   null when unsupported (JBIG2/CCITT, broken data)
+ * opts.fill = [r,g,b] 0..1 for stencil masks (ImageMask true).
+ */
+async function decodeImage(doc, v, { fill = [0, 0, 0], res = null, inline = false } = {}) {
+  const d = v.dict
+  const g = (k, k2) => { const x = d.get(k) ?? (k2 ? d.get(k2) : undefined); return deref(doc, x) }
+  const w = g('Width', 'W') ?? 0
+  const h = g('Height', 'H') ?? 0
+  if (!w || !h || w * h > 40e6) return null
+  const isMask = g('ImageMask', 'IM') === true
+  const bpc = isMask ? 1 : g('BitsPerComponent', 'BPC') ?? 8
+  const decodeArr = g('Decode', 'D')
+  const chain = await decodeChain(d, v.data, { stopAtImage: true })
+  const smaskAlpha = !isMask && !inline ? await softMask(doc, d) : null
+
+  if (chain.codec === 'DCTDecode' || chain.codec === 'JPXDecode') {
+    let cmyk = false
+    const csv = g('ColorSpace', 'CS')
+    if (csv) { const cs = await resolveColorSpace(doc, csv, res).catch(() => null); cmyk = cs?.n === 4 }
+    return { kind: chain.codec === 'DCTDecode' ? 'jpeg' : 'jpx', w, h, data: chain.data, smask: smaskAlpha, cmyk, invert: Array.isArray(decodeArr) && decodeArr[0] === 1 }
+  }
+  if (chain.codec) return null // JBIG2 / CCITT
+
+  const data = chain.data
+  const rgba = new Uint8ClampedArray(w * h * 4)
+  if (isMask) {
+    const paintOn = Array.isArray(decodeArr) && decodeArr[0] === 1 ? 1 : 0
+    const rowBytes = Math.ceil(w / 8)
+    const [r, gg, b] = fill.map((c) => Math.round(c * 255))
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const bit = (data[y * rowBytes + (x >> 3)] >> (7 - (x & 7))) & 1
+        const o = (y * w + x) * 4
+        if (bit === paintOn) { rgba[o] = r; rgba[o + 1] = gg; rgba[o + 2] = b; rgba[o + 3] = 255 }
+      }
+    }
+    return { kind: 'rgba', w, h, rgba, stencil: true }
+  }
+
+  const cs = await resolveColorSpace(doc, g('ColorSpace', 'CS') ?? { k: 'n', v: 'DeviceGray' }, res)
+  const n = cs.n || 1
+  const rowBytes = Math.ceil((w * n * bpc) / 8)
+  const maxV = (1 << bpc) - 1
+  const dec = Array.isArray(decodeArr) ? decodeArr : cs.lab ? [0, 100, ...cs.lab] : null
+  const samples = new Array(w * n)
+  const comps = new Array(n)
+  // colour-key masking: /Mask [min0 max0 min1 max1 …] on raw sample values
+  const maskV = g('Mask')
+  const keyRanges = Array.isArray(maskV) ? maskV.map((x) => deref(doc, x)) : null
+  // cache for 8-bit single-channel / indexed (cheap and very common)
+  const lut = n === 1 && bpc <= 8 ? new Map() : null
+  for (let y = 0; y < h; y++) {
+    readSamples(data, y * rowBytes, w * n, bpc, samples)
+    for (let x = 0; x < w; x++) {
+      const o = (y * w + x) * 4
+      let rgb
+      if (lut) {
+        const s = samples[x]
+        rgb = lut.get(s)
+        if (!rgb) {
+          let c = cs.indexed ? (dec ? dec[0] + (s * (dec[1] - dec[0])) / maxV : s) : dec ? dec[0] + (s * (dec[1] - dec[0])) / maxV : s / maxV
+          rgb = cs.toRGB([c])
+          lut.set(s, rgb)
+        }
+      } else {
+        for (let k = 0; k < n; k++) {
+          const s = samples[x * n + k]
+          comps[k] = dec ? dec[2 * k] + (s * (dec[2 * k + 1] - dec[2 * k])) / maxV : s / maxV
+        }
+        if (cs.lab) { // Lab components decode over their own ranges already
+          rgb = labToRgb(comps[0], comps[1], comps[2])
+        } else rgb = cs.toRGB(comps)
+      }
+      rgba[o] = rgb[0] * 255
+      rgba[o + 1] = rgb[1] * 255
+      rgba[o + 2] = rgb[2] * 255
+      let a = 255
+      if (keyRanges) {
+        let inside = true
+        for (let k = 0; k < n; k++) {
+          const s = samples[x * n + k]
+          if (s < keyRanges[2 * k] || s > keyRanges[2 * k + 1]) { inside = false; break }
+        }
+        if (inside) a = 0
+      }
+      rgba[o + 3] = a
+    }
+  }
+  if (smaskAlpha) applyAlpha(rgba, w, h, smaskAlpha)
+  else if (maskV?.k === 't') { // stencil mask stream → alpha
+    const m = await decodeImage(doc, { dict: new Map([...maskV.dict, ['ImageMask', true]]), data: maskV.data }, { fill: [0, 0, 0] }).catch(() => null)
+    if (m) applyAlpha(rgba, w, h, { w: m.w, h: m.h, a: Uint8ClampedArray.from({ length: m.w * m.h }, (_, i) => m.rgba[i * 4 + 3]) })
+  }
+  return { kind: 'rgba', w, h, rgba }
+}
+
+/** /SMask → {w,h,a} alpha plane (gray decoded). */
+async function softMask(doc, d) {
+  const sm = deref(doc, d.get('SMask'))
+  if (sm?.k !== 't') return null
+  const m = await decodeImage(doc, { dict: new Map([...sm.dict, ['ColorSpace', { k: 'n', v: 'DeviceGray' }]]).set('SMask', undefined), data: sm.data }).catch(() => null)
+  if (!m || m.kind !== 'rgba') return null
+  const a = new Uint8ClampedArray(m.w * m.h)
+  for (let i = 0; i < a.length; i++) a[i] = m.rgba[i * 4]
+  return { w: m.w, h: m.h, a }
+}
+
+/** Multiply an alpha plane (any size — nearest resample) into rgba. */
+function applyAlpha(rgba, w, h, { w: mw, h: mh, a }) {
+  for (let y = 0; y < h; y++) {
+    const my = Math.min(mh - 1, Math.floor((y * mh) / h))
+    for (let x = 0; x < w; x++) {
+      const mx = Math.min(mw - 1, Math.floor((x * mw) / w))
+      const o = (y * w + x) * 4 + 3
+      rgba[o] = (rgba[o] * a[my * mw + mx]) / 255
+    }
+  }
 }
 
 // ---- src/zip.js ----
@@ -990,9 +1970,12 @@ function zlibStore(data) {
   return out.subarray(0, o)
 }
 
-/** pixels: Uint8Array of RGB or grayscale samples. gray=true → 1 byte/px, else 3. */
-function pngEncode(width, height, pixels, gray = false) {
-  const bpp = gray ? 1 : 3
+/**
+ * pixels: Uint8Array of samples. channels: true → gray (1), false → RGB (3),
+ * or a number: 1 gray, 2 gray+alpha, 3 RGB, 4 RGBA.
+ */
+function pngEncode(width, height, pixels, channels = false) {
+  const bpp = channels === true ? 1 : channels === false ? 3 : channels
   const stride = width * bpp
   if (pixels.length !== stride * height) throw new Error('pixel buffer size mismatch')
 
@@ -1023,7 +2006,7 @@ function pngEncode(width, height, pixels, gray = false) {
   dv.setUint32(0, width)
   dv.setUint32(4, height)
   ihdr[8] = 8 // bit depth
-  ihdr[9] = gray ? 0 : 2 // color type
+  ihdr[9] = { 1: 0, 2: 4, 3: 2, 4: 6 }[bpp] // color type
   // compression/filter/interlace = 0
 
   const sig = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
@@ -1768,19 +2751,43 @@ async function scrubPdf(bytes) {
 /** Page text, lines reassembled by position (top→bottom, left→right). */
 async function pageText(doc, leaf) {
   const { ops } = await collectDrawOps(doc, leaf)
-  const texts = ops.filter((o) => o.t === 'text' && o.str).sort((a, b) => a.y - b.y || a.x - b.x)
+  return textFromOps(ops)
+}
+
+/**
+ * Text ops → reading-order text. Runs are grouped into lines by baseline, then
+ * joined by GEOMETRY: a space only where the gap between runs is wider than a
+ * fraction of the font size. (Kerned TJ arrays and per-glyph positioning emit
+ * one op per fragment — joining those with blanks gives "Quar t erly".)
+ */
+function textFromOps(ops) {
+  const texts = ops.filter((o) => o.t === 'text' && o.str && Math.abs(o.rot ?? 0) < 0.3)
+    .sort((a, b) => a.y - b.y || a.x - b.x)
   const lines = []
   let cur = []
+  let lineY = 0
   for (const t of texts) {
-    const last = cur[cur.length - 1]
-    if (last && Math.abs(t.y - last.y) > Math.max(2, t.h * 0.5)) { lines.push(cur); cur = [] }
+    if (cur.length && Math.abs(t.y - lineY) > Math.max(2, Math.min(t.h, cur[0].h) * 0.5)) { lines.push(cur); cur = [] }
+    if (!cur.length) lineY = t.y
     cur.push(t)
   }
   if (cur.length) lines.push(cur)
-  return lines
-    .map((l) => l.sort((a, b) => a.x - b.x).map((t) => t.str).join(' ').replace(/\s+/g, ' ').trim())
-    .filter(Boolean)
-    .join('\n')
+  // vertical / rotated runs: their own lines, kept in stream order
+  const rotated = ops.filter((o) => o.t === 'text' && o.str && Math.abs(o.rot ?? 0) >= 0.3).map((o) => o.str.trim()).filter(Boolean)
+  const out = lines.map((l) => {
+    l.sort((a, b) => a.x - b.x)
+    let s = ''
+    let end = -Infinity
+    for (const t of l) {
+      const size = t.size || t.h || 10
+      const gap = t.x - end
+      if (s && gap > size * 0.18 && !s.endsWith(' ') && !t.str.startsWith(' ')) s += ' '
+      s += t.str
+      end = Math.max(end, t.x + t.w)
+    }
+    return s.replace(/[ﬀ-ﬆ]/g, (c) => c.normalize('NFKC')).replace(/\s+/g, ' ').trim()
+  }).filter(Boolean)
+  return [...out, ...rotated].join('\n')
 }
 
 /** All pages → ['page 1 text', ...]. */
@@ -1825,291 +2832,30 @@ async function compressPdf(bytes, { reimage } = {}) {
         continue
       }
     }
-    // multi-filter chains carry per-filter DecodeParms arrays — collapsing to a
-    // single FlateDecode would misalign them, so leave those streams as-is.
-    const fArr = get(v.dict, 'Filter')
-    if (Array.isArray(fArr)) continue
+    // streamData undoes the whole chain incl. predictors, so the re-deflated
+    // bytes are raw — DecodeParms no longer applies and must go with the old filters.
     const raw = await streamData(v)
     if (raw === null) continue
     const packed = await deflate(raw)
     if (packed.length < v.data.length) {
       v.data = packed
       v.dict.set('Filter', name('FlateDecode'))
-      // dict-form DecodeParms stays: the re-deflated data is still
-      // predictor-coded, so the parms still describe it correctly.
+      v.dict.delete('DecodeParms')
+      v.dict.delete('DP')
     }
   }
   const out = writeDoc(dst, catNum, trailer)
   return { bytes: out, before: bytes.length, after: out.length }
 }
 
-// ---------- password protect (Standard handler, V=2 R=3, RC4-128) ----------
-
-const PAD32 = new Uint8Array([
-  0x28, 0xbf, 0x4e, 0x5e, 0x4e, 0x75, 0x8a, 0x41, 0x64, 0x00, 0x4e, 0x56, 0xff, 0xfa, 0x01, 0x08,
-  0x2e, 0x2e, 0x00, 0xb6, 0xd0, 0x68, 0x3e, 0x80, 0x2f, 0x0c, 0xa9, 0xfe, 0x64, 0x53, 0x69, 0x7a,
-])
-
-const pwdPad = (s) => {
-  // Standard-handler passwords are byte strings; non-Latin-1 input would be
-  // mangled differently by every reader — refuse rather than lock the user out
-  for (const c of s) {
-    if (c.codePointAt(0) > 0xff) throw new Error('password must use Latin-1 characters only')
-  }
-  const b = Uint8Array.from(s, (c) => c.charCodeAt(0) & 0xff)
-  const out = new Uint8Array(32)
-  out.set(b.subarray(0, 32))
-  if (b.length < 32) out.set(PAD32.subarray(0, 32 - b.length), b.length)
-  return out
-}
-
-const xorKey = (key, i) => Uint8Array.from(key, (b) => b ^ i)
-
-/** R≥3 owner-key: 50×MD5 then 20 RC4 rounds. */
-function computeO(ownerPad, userPad, keyLen) {
-  let d = md5(ownerPad)
-  for (let i = 0; i < 50; i++) d = md5(d.subarray(0, keyLen))
-  const ok = d.subarray(0, keyLen)
-  let data = userPad
-  for (let i = 0; i < 20; i++) data = rc4(xorKey(ok, i), data)
-  return data
-}
-
-/** File key: MD5(pad ‖ O ‖ P‖ ID0); R≥3 adds 50×MD5 of the first keyLen bytes. */
-function computeFileKey(userPad, O, P, id0, keyLen, R) {
-  const le = new Uint8Array(4)
-  new DataView(le.buffer).setInt32(0, P, true)
-  let d = md5(concat([userPad, O, le, id0]))
-  if (R >= 3) for (let i = 0; i < 50; i++) d = md5(d.subarray(0, keyLen))
-  return d.subarray(0, keyLen)
-}
-
-/** R≥3 /U: 20 RC4 rounds over MD5(PAD ‖ ID0) + 16 pad bytes. */
-function computeU(fileKey, id0) {
-  let data = md5(concat([PAD32, id0]))
-  for (let i = 0; i < 20; i++) data = rc4(xorKey(fileKey, i), data)
-  const out = new Uint8Array(32)
-  out.set(data)
-  out.set(md5(fileKey), 16)
-  return out
-}
-
-const objKey = (fileKey, n, g) =>
-  md5(concat([fileKey, new Uint8Array([n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff, g & 0xff, (g >> 8) & 0xff])])).subarray(0, 16)
-
-/** RC4 every string/hex/stream inside a value with the object's key. */
-function rc4Walk(v, ok) {
-  if (v instanceof Map) for (const x of v.values()) rc4Walk(x, ok)
-  else if (Array.isArray(v)) for (const x of v) rc4Walk(x, ok)
-  else if (v?.k === 's' || v?.k === 'x') v.bytes = rc4(ok, v.bytes)
-  else if (isStream(v)) { rc4Walk(v.dict, ok); v.data = rc4(ok, v.data) }
-}
-
-/** Deep-clone one object, remapping refs through a pre-filled map. */
-const cloneVal = (v, refMap) => {
-  if (isRef(v)) return refMap.get(`${v.n} ${v.g}`) ?? null
-  if (v instanceof Map) {
-    const m = new Map()
-    for (const [k, x] of v) m.set(k, cloneVal(x, refMap))
-    return m
-  }
-  if (Array.isArray(v)) return v.map((x) => cloneVal(x, refMap))
-  if (isStream(v)) return stream(cloneVal(v.dict, refMap), v.data.slice())
-  if (v?.k === 's' || v?.k === 'x') return { ...v, bytes: v.bytes.slice() }
-  return v
-}
-
-/** Full-copy every src object into dst (minus `skip` keys); returns {numOf, rootNum}. */
-function cloneDoc(src, dst, skip = new Set()) {
-  const numOf = new Map()
-  const refMap = new Map()
-  for (const key of src.objects.keys()) if (!skip.has(key)) numOf.set(key, dst.alloc())
-  for (const [k, num] of numOf) refMap.set(k, ref(num, 0))
-  for (const [key, ent] of src.objects) {
-    if (skip.has(key)) continue
-    dst.set(numOf.get(key), cloneVal(ent.v, refMap))
-  }
-  const rootRef = get(src.trailer, 'Root')
-  return { numOf, refMap, rootNum: numOf.get(`${rootRef.n} ${rootRef.g}`) }
-}
-
-const PERMS = -4 // print + copy + modify allowed; password gates opening
-
-/**
- * Password-protect a PDF (Standard security handler, RC4-128, R=3).
- * Opens in every real PDF reader with the user password; owner password
- * defaults to the user password.
- */
-function protectPdf(bytes, userPwd, { ownerPwd } = {}) {
-  return parsePdf(bytes).then((src) => {
-    const dst = newDoc()
-    const { numOf, refMap, rootNum } = cloneDoc(src, dst)
-    const srcId = get(src.trailer, 'ID')
-    const id0 = Array.isArray(srcId) && srcId[0]?.bytes
-      ? srcId[0].bytes.slice(0, 16)
-      : md5(concat([bytes.slice(0, 1024), enc(String(bytes.length))]))
-    const id1 = md5(concat([id0, pwdPad(userPwd)]))
-    const uPad = pwdPad(userPwd)
-    const O = computeO(pwdPad(ownerPwd ?? userPwd), uPad, 16)
-    const fileKey = computeFileKey(uPad, O, PERMS, id0, 16, 3)
-    const U = computeU(fileKey, id0)
-    for (const [num, v] of dst.objects) rc4Walk(v, objKey(fileKey, num, 0))
-    const encNum = dst.alloc()
-    dst.set(encNum, new Map([
-      ['Filter', name('Standard')], ['V', 2], ['R', 3], ['Length', 128], ['P', PERMS],
-      ['O', { k: 'x', bytes: O }], ['U', { k: 'x', bytes: U }],
-    ]))
-    const trailer = new Map([
-      ['Encrypt', ref(encNum, 0)],
-      ['ID', [{ k: 'x', bytes: id0 }, { k: 'x', bytes: id1 }]],
-    ])
-    const infoRef = get(src.trailer, 'Info')
-    if (isRef(infoRef)) {
-      const mapped = numOf.get(`${infoRef.n} ${infoRef.g}`)
-      if (mapped) trailer.set('Info', ref(mapped, 0))
-    } else if (infoRef instanceof Map) {
-      trailer.set('Info', cloneVal(infoRef, refMap))
-    }
-    return writeDoc(dst, rootNum, trailer)
-  })
-}
-
-/**
- * Validate the encrypt dict is a mode we actually implement — Standard
- * handler, RC4 (V≤2, crypt filters absent or all CFM=/V2), R∈{2,3}.
- * Anything else (AES, public-key, R≥4 extensions) throws rather than
- * silently emitting a corrupt unlock.
- */
-function checkEncryptDict(encDict, src) {
-  const dd = (v) => (isRef(v) ? deref(src, v) : v)
-  const filt = dd(get(encDict, 'Filter'))
-  if (!isName(filt) || filt.v !== 'Standard') throw new Error('unsupported security handler')
-  const V = dd(get(encDict, 'V')) ?? 0
-  const R = dd(get(encDict, 'R')) ?? 2
-  if (V > 2 || R > 3 || R < 2) throw new Error('unsupported encryption (AES or newer revision)')
-  let cf = dd(get(encDict, 'CF'))
-  if (cf instanceof Map) {
-    const cfmName = (n) => {
-      const cfm = dd(get(dd(cf.get(n)), 'CFM'))
-      return isName(cfm) ? cfm.v : 'V2'
-    }
-    for (const cfv of cf.values()) {
-      const cfm = dd(get(dd(cfv), 'CFM'))
-      if (isName(cfm) && cfm.v !== 'V2' && cfm.v !== 'None')
-        throw new Error('unsupported crypt filter (' + cfm.v + ')')
-    }
-    // the filters actually selected for streams/strings must be RC4 —
-    // /None or anything else means partial encryption we can't walk safely
-    for (const sel of ['StmF', 'StrF']) {
-      const sn = dd(get(encDict, sel))
-      if (isName(sn) && sn.v !== 'Identity' && cfmName(sn.v) !== 'V2')
-        throw new Error('unsupported selective crypt filter (' + sn.v + ')')
-    }
-  }
-  const keyLen = V === 2 ? Math.min(16, ((dd(get(encDict, 'Length')) ?? 40) / 8) | 0) : 5
-  return { V, R, keyLen }
-}
-
-/**
- * Unlock a protected PDF with the user OR owner password → rebuilt
- * unprotected bytes. Supports Standard-handler RC4 (R2/R3); AES-encrypted
- * files throw a clear 'unsupported' error. Throws 'wrong password' if
- * neither password authenticates.
- */
-async function decryptPdf(bytes, pwd) {
-  const src = await parsePdf(bytes, [], true)
-  const encRef = get(src.trailer, 'Encrypt')
-  if (!encRef) return bytes
-  const encDict = isRef(encRef) ? deref(src, encRef) : encRef
-  const { R, keyLen } = checkEncryptDict(encDict, src)
-  const O = get(encDict, 'O')?.bytes, U = get(encDict, 'U')?.bytes
-  const P = get(encDict, 'P') ?? PERMS
-  const idArr = get(src.trailer, 'ID')
-  const id0 = idArr?.[0]?.bytes
-  if (!O || !U || !id0) throw new Error('unsupported encryption')
-  const uMatch = (key) => {
-    if (R === 2) {
-      const data = rc4(key, PAD32)
-      return U.slice(0, 32).every((b, i) => b === data[i])
-    }
-    let data = md5(concat([PAD32, id0]))
-    for (let i = 0; i < 20; i++) data = rc4(xorKey(key, i), data)
-    return U.slice(0, 16).every((b, i) => b === data[i])
-  }
-  let fileKey = computeFileKey(pwdPad(pwd), O, P, id0, keyLen, R)
-  if (!uMatch(fileKey)) {
-    // owner-password path: recover the user pad from O
-    let d = md5(pwdPad(pwd))
-    if (R >= 3) for (let i = 0; i < 50; i++) d = md5(d.subarray(0, keyLen))
-    const ok = d.subarray(0, keyLen)
-    let data = O
-    if (R === 2) data = rc4(ok, data)
-    else for (let i = 19; i >= 0; i--) data = rc4(xorKey(ok, i), data)
-    fileKey = computeFileKey(data, O, P, id0, keyLen, R)
-    if (!uMatch(fileKey)) throw new Error('wrong password')
-  }
-  // encrypted object streams: parsePdf's ObjStm pass ran against ciphertext,
-  // so decrypt each container with its source key and unpack the objects now.
-  // (stream bytes are one encrypted unit — inner objects need no extra keys)
-  const objStmKeys = new Set()
-  const unpackedKeys = new Set() // inner objects: already plaintext — never rc4Walk
-  for (const [key, ent] of src.objects) {
-    const v = ent.v
-    if (!isStream(v) || !typeIs(v.dict, 'ObjStm')) continue
-    const N = get(v.dict, 'N'), first = get(v.dict, 'First')
-    if (typeof N !== 'number' || typeof first !== 'number') continue
-    const [n, g] = key.split(' ').map(Number)
-    const data = await streamData({ ...v, data: rc4(objKey(fileKey, n, g), v.data) }).catch(() => null)
-    if (!data) continue
-    objStmKeys.add(key)
-    const header = dec(data.slice(0, first)).trim().split(/\s+/).map(Number)
-    for (let i = 0; i < N; i++) {
-      const num = header[i * 2], off = header[i * 2 + 1]
-      try {
-        const [v2] = parseValue(data, first + off)
-        const k2 = `${num} 0`
-        if (!src.objects.has(k2)) {
-          src.objects.set(k2, { n: num, g: 0, v: v2 })
-          unpackedKeys.add(k2)
-        }
-      } catch { /* skip malformed inner object */ }
-    }
-  }
-  // decrypt each object keyed by its SOURCE object number/generation —
-  // encryption binds keys to the original ids, so keying on renumbered
-  // clones (as a naive copy would) produces garbage on any non-contiguous file
-  const encKey = isRef(encRef) ? `${encRef.n} ${encRef.g}` : null
-  const skip = new Set([...objStmKeys, ...(encKey ? [encKey] : [])])
-  const dst = newDoc()
-  const { numOf, refMap, rootNum } = cloneDoc(src, dst, skip)
-  for (const [key] of src.objects) {
-    if (skip.has(key) || unpackedKeys.has(key)) continue
-    const [n, g] = key.split(' ').map(Number)
-    rc4Walk(dst.objects.get(numOf.get(key)), objKey(fileKey, n, g))
-  }
-  const id1 = md5(concat([id0, enc('unlocked')]))
-  const trailer = new Map([['ID', [{ k: 'x', bytes: id0 }, { k: 'x', bytes: id1 }]]])
-  const infoRef = get(src.trailer, 'Info')
-  if (isRef(infoRef)) {
-    const mapped = numOf.get(`${infoRef.n} ${infoRef.g}`)
-    if (mapped) trailer.set('Info', ref(mapped, 0))
-  } else if (infoRef instanceof Map) {
-    trailer.set('Info', cloneVal(infoRef, refMap))
-  }
-  return writeDoc(dst, rootNum, trailer)
-}
-
-/** Decode one stream's FlateDecode filter chain → bytes (null if unsupported). */
+/** Decode a stream through its whole filter chain → bytes (null for image codecs / unsupported). */
 async function streamData(s) {
-  let d = s.data
-  const fl = get(s.dict, 'Filter')
-  const chain = Array.isArray(fl) ? fl : fl ? [fl] : []
-  for (const f of chain) {
-    const fn = isName(f) ? f.v : null
-    if (fn === 'FlateDecode' || fn === 'Fl') d = await inflate(d)
-    else return null
+  try {
+    const { data, codec } = await decodeChain(s.dict, s.data, { stopAtImage: true })
+    return codec ? null : data
+  } catch {
+    return null
   }
-  return d
 }
 
 /** Concatenated, decoded Contents bytes for a page (null if undecodable). */
@@ -2344,6 +3090,8 @@ async function fontMapFromRes(doc, res) {
     let fd = isRef(fref) ? deref(doc, fref) : fref
     if (isStream(fd)) fd = fd.dict
     if (!(fd instanceof Map)) continue
+    const hit = FONT_CACHE.get(fd)
+    if (hit) { out.set(fname, hit); continue }
     const info = { widths: null, firstChar: 0, wRanges: null, tounicode: null, codeLen: null, dw: 1000 }
     // Type0 fonts wrap a descendant CIDFont that carries /W + /DW; codes are
     // multi-byte (2 for Identity encodings) even without a ToUnicode map
@@ -2377,16 +3125,36 @@ async function fontMapFromRes(doc, res) {
         } else i++
       }
     }
+    // style hints for the renderer + simple-font encoding table for text
+    let base = get(fd, 'BaseFont')
+    base = isName(base) ? base.v.replace(/^[A-Z]{6}\+/, '') : ''
+    let fdesc = get(cidFd, 'FontDescriptor') ?? get(fd, 'FontDescriptor')
+    if (isRef(fdesc)) fdesc = deref(doc, fdesc)
+    const flags = fdesc instanceof Map ? get(fdesc, 'Flags') ?? 0 : 0
+    const lname = base.toLowerCase()
+    info.base = base
+    info.bold = /bold|black|heavy|semibold|demi|,b/.test(lname) || (fdesc instanceof Map && (get(fdesc, 'FontWeight') ?? 400) >= 600)
+    info.italic = /italic|oblique|,i/.test(lname) || !!(flags & 64)
+    info.mono = /courier|mono|consol|menlo/.test(lname) || !!(flags & 1)
+    info.serif = !info.mono && (/times|serif|roman|georgia|garamond|cmr|cmti|cmbx|minion|palatino|book|cambria/.test(lname) || (!!(flags & 2) && !/sans|arial|helvetica|cmss/.test(lname)))
+    info.symbol = /symbol|dingbat/.test(lname)
+    if (!isCid) {
+      let encv = get(fd, 'Encoding')
+      if (isRef(encv)) encv = deref(doc, encv)
+      info.enc = simpleEncodingTable(encv, { symbolic: !!(flags & 4) && !encv })
+    }
     let tu = get(fd, 'ToUnicode')
     if (isRef(tu)) tu = deref(doc, tu)
     if (isStream(tu)) {
       const d = await streamData(tu).catch(() => null)
       if (d) info.tounicode = parseToUnicode(d)
     }
+    FONT_CACHE.set(fd, info)
     out.set(fname, info)
   }
   return out
 }
+const FONT_CACHE = new WeakMap() // font dict → parsed info (fonts repeat on every page)
 
 /** Decode a PDF string operand using a font entry (ToUnicode → latin1). */
 function decodeString(bytes, font) {
@@ -2396,8 +3164,13 @@ function decodeString(bytes, font) {
     for (let i = 0; i + codeLen <= bytes.length; i += codeLen) {
       let code = 0
       for (let k = 0; k < codeLen; k++) code = code * 256 + bytes[i + k]
-      out += map.get(code) ?? ''
+      out += map.get(code) ?? (codeLen === 1 && font.enc ? font.enc[code] : '')
     }
+    return out
+  }
+  if (font?.enc) {
+    let out = ''
+    for (let i = 0; i < bytes.length; i++) out += font.enc[bytes[i]]
     return out
   }
   // multi-byte codes without a map decode as the raw CID values
@@ -2855,96 +3628,35 @@ async function walkContent(doc, st, data, res, fonts) {
 
 // ---------- extract images ----------
 
-/** Undo PNG/TIFF predictors on inflated image data (DecodeParms). */
-function unPredict(data, { predictor = 1, columns = 1, colors = 1, bpc = 8 }) {
-  if (predictor === 1) return data
-  const bpp = Math.max(1, Math.ceil((colors * bpc) / 8))
-  const rowBytes = Math.ceil((columns * colors * bpc) / 8)
-  if (predictor === 2) {
-    const out = new Uint8Array(data.length)
-    for (let y = 0; y * rowBytes < data.length; y++) {
-      const row = y * rowBytes
-      for (let x = 0; x < rowBytes; x++) {
-        const left = x >= bpp ? out[row + x - bpp] : 0
-        out[row + x] = (data[row + x] + left) & 0xff
-      }
-    }
-    return out
-  }
-  if (predictor < 10 || predictor > 15) throw new Error(`unsupported predictor ${predictor}`)
-  const hasFilterByte = predictor >= 10
-  const rowStride = rowBytes + (hasFilterByte ? 1 : 0)
-  const rows = Math.floor(data.length / rowStride)
-  const out = new Uint8Array(rows * rowBytes)
-  const paeth = (a, b, c) => {
-    const p = a + b - c
-    const pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c)
-    return pa <= pb && pa <= pc ? a : pb <= pc ? b : c
-  }
-  for (let y = 0; y < rows; y++) {
-    const src = y * rowStride + (hasFilterByte ? 1 : 0)
-    const f = hasFilterByte ? data[y * rowStride] : 1 // Optimum → sub? spec: treated as per-row
-    const prev = y > 0 ? (y - 1) * rowBytes : -1
-    for (let x = 0; x < rowBytes; x++) {
-      const a = x >= bpp ? out[y * rowBytes + x - bpp] : 0
-      const b = prev >= 0 ? out[prev + x] : 0
-      const c = x >= bpp && prev >= 0 ? out[prev + x - bpp] : 0
-      let v = data[src + x]
-      if (f === 1) v += a
-      else if (f === 2) v += b
-      else if (f === 3) v += (a + b) >> 1
-      else if (f === 4) v += paeth(a, b, c)
-      out[y * rowBytes + x] = v & 0xff
-    }
-  }
-  return out
-}
-
-/**
- * Pull embedded images out of a PDF.
- * Returns { images: [{name, data, w, h}], skipped } — DCTDecode→.jpg,
- * JPXDecode→.jp2, FlateDecode raw RGB/gray 8-bit→.png, else counted in skipped.
- */
 /**
  * Decode one image XObject stream → {data, mime, ext} or null when unsupported.
- * Applies the full /Filter chain in order; a trailing image codec (DCT/JPX)
- * names the format, everything else is unwrapped as compression.
+ * JPEG/JPEG2000 payloads are passed through untouched (lossless extraction);
+ * everything else is decoded through its colour space to PNG (alpha kept).
  */
 async function decodeImageStream(doc, v) {
-  const w = get(v.dict, 'Width') ?? 0
-  const h = get(v.dict, 'Height') ?? 0
-  const filterVal = get(v.dict, 'Filter')
-  const chain = (Array.isArray(filterVal) ? filterVal : filterVal === undefined ? [] : [filterVal]).map(
-    (fl) => (isName(fl) ? fl.v : null),
-  )
-  const codec = { DCTDecode: ['.jpg', 'image/jpeg'], DCT: ['.jpg', 'image/jpeg'], JPXDecode: ['.jp2', 'image/jp2'], JPX: ['.jp2', 'image/jp2'] }
-  const last = chain.length ? chain[chain.length - 1] : null
-  const out = last ? codec[last] : undefined
-  const decodeChain = out ? chain.slice(0, -1) : chain
-  let data = v.data
-  for (const fl of decodeChain) {
-    if (fl === 'FlateDecode' || fl === 'Fl') data = await inflate(data)
-    else return null
+  const im = await decodeImage(doc, v)
+  if (!im) return null
+  if (im.kind === 'jpeg') return { data: im.data, mime: 'image/jpeg', ext: '.jpg', smask: im.smask, cmyk: im.cmyk, invert: im.invert }
+  if (im.kind === 'jpx') return { data: im.data, mime: 'image/jp2', ext: '.jp2' }
+  return { data: rgbaToPng(im.w, im.h, im.rgba), mime: 'image/png', ext: '.png', rgba: im.rgba, w: im.w, h: im.h }
+}
+
+/** RGBA → smallest faithful PNG (drops alpha / colour when unused). */
+function rgbaToPng(w, h, rgba) {
+  let opaque = true, gray = true
+  for (let i = 0; i < rgba.length; i += 4) {
+    if (rgba[i + 3] !== 255) opaque = false
+    if (rgba[i] !== rgba[i + 1] || rgba[i] !== rgba[i + 2]) gray = false
+    if (!opaque && !gray) break
   }
-  if (out) return { data, mime: out[1], ext: out[0] }
-  // anything left in decodeChain is Flate by now — non-Flate returns above
-  const bpc = get(v.dict, 'BitsPerComponent') ?? 8
-  let cs = get(v.dict, 'ColorSpace')
-  if (isRef(cs)) cs = deref(doc, cs)
-  const csName = isName(cs) ? cs.v : Array.isArray(cs) && isName(cs[0]) ? cs[0].v : null
-  if (bpc !== 8 || (csName !== 'DeviceRGB' && csName !== 'DeviceGray')) return null
-  const colors = csName === 'DeviceRGB' ? 3 : 1
-  let dp = get(v.dict, 'DecodeParms') ?? get(v.dict, 'DP')
-  if (Array.isArray(dp)) dp = [...dp].reverse().find((x) => x instanceof Map)
-  const parms = dp instanceof Map ? {
-    predictor: get(dp, 'Predictor') ?? 1,
-    columns: get(dp, 'Columns') ?? w,
-    colors: get(dp, 'Colors') ?? colors,
-    bpc: get(dp, 'BitsPerComponent') ?? 8,
-  } : { predictor: 1, columns: w, colors, bpc: 8 }
-  const raw = unPredict(data, parms)
-  if (raw.length !== w * h * colors) return null
-  return { data: pngEncode(w, h, raw, colors === 1), mime: 'image/png', ext: '.png' }
+  const ch = (gray ? 1 : 3) + (opaque ? 0 : 1)
+  const px = new Uint8Array(w * h * ch)
+  for (let i = 0, o = 0; i < rgba.length; i += 4) {
+    px[o++] = rgba[i]
+    if (!gray) { px[o++] = rgba[i + 1]; px[o++] = rgba[i + 2] }
+    if (!opaque) px[o++] = rgba[i + 3]
+  }
+  return pngEncode(w, h, px, ch)
 }
 
 /**
@@ -2966,6 +3678,389 @@ async function extractImages(bytes) {
     else skipped++
   }
   return { images, skipped }
+}
+
+// ---- src/pdf/security.js ----
+// PDF Standard Security Handler — unlock RC4-40/128, AES-128 (R4) and
+// AES-256 (R5/R6); protect with AES-256 (default), AES-128 or RC4-128,
+// including owner password + permission flags.
+
+const PAD32 = new Uint8Array([
+  0x28, 0xbf, 0x4e, 0x5e, 0x4e, 0x75, 0x8a, 0x41, 0x64, 0x00, 0x4e, 0x56, 0xff, 0xfa, 0x01, 0x08,
+  0x2e, 0x2e, 0x00, 0xb6, 0xd0, 0x68, 0x3e, 0x80, 0x2f, 0x0c, 0xa9, 0xfe, 0x64, 0x53, 0x69, 0x7a,
+])
+
+/** R2–R4 passwords are Latin-1 byte strings, padded/truncated to 32 bytes. */
+const pwdPad = (s) => {
+  for (const c of s) {
+    if (c.codePointAt(0) > 0xff) throw new Error('this encryption mode needs a Latin-1 password — use AES-256 for other characters')
+  }
+  const b = Uint8Array.from(s, (c) => c.charCodeAt(0) & 0xff)
+  const out = new Uint8Array(32)
+  out.set(b.subarray(0, 32))
+  if (b.length < 32) out.set(PAD32.subarray(0, 32 - b.length), b.length)
+  return out
+}
+/** R5/R6 passwords are UTF-8, max 127 bytes. */
+const pwdUtf8 = (s) => enc(s.normalize('NFKC')).slice(0, 127)
+
+const xorKey = (key, i) => Uint8Array.from(key, (b) => b ^ i)
+const le32 = (n) => { const b = new Uint8Array(4); new DataView(b.buffer).setInt32(0, n, true); return b }
+const bytesEq = (a, b, n = a.length) => { for (let i = 0; i < n; i++) if (a[i] !== b[i]) return false; return true }
+
+function randomBytes(n) {
+  const out = new Uint8Array(n)
+  if (globalThis.crypto?.getRandomValues) return globalThis.crypto.getRandomValues(out)
+  let seed = md5(enc(`${Date.now()}:${Math.random()}:${performance.now?.()}`))
+  for (let i = 0; i < n; i++) { if (i % 16 === 0 && i) seed = md5(seed); out[i] = seed[i % 16] ^ ((Math.random() * 256) | 0) }
+  return out
+}
+
+// ---------- R2–R4 (MD5/RC4 key derivation) ----------
+
+function computeO(ownerPad, userPad, keyLen, R) {
+  let d = md5(ownerPad)
+  if (R >= 3) for (let i = 0; i < 50; i++) d = md5(d.subarray(0, keyLen))
+  const ok = d.subarray(0, keyLen)
+  if (R === 2) return rc4(ok, userPad)
+  let data = userPad
+  for (let i = 0; i < 20; i++) data = rc4(xorKey(ok, i), data)
+  return data
+}
+
+function computeFileKey(userPad, O, P, id0, keyLen, R, encryptMeta = true) {
+  const parts = [userPad, O.subarray(0, 32), le32(P), id0]
+  if (R >= 4 && !encryptMeta) parts.push(new Uint8Array([255, 255, 255, 255]))
+  let d = md5(concat(parts))
+  if (R >= 3) for (let i = 0; i < 50; i++) d = md5(d.subarray(0, keyLen))
+  return d.slice(0, keyLen)
+}
+
+function computeU(fileKey, id0, R) {
+  if (R === 2) return rc4(fileKey, PAD32)
+  let data = md5(concat([PAD32, id0]))
+  for (let i = 0; i < 20; i++) data = rc4(xorKey(fileKey, i), data)
+  const out = new Uint8Array(32)
+  out.set(data)
+  out.set(md5(fileKey), 16) // arbitrary padding (spec) — deterministic here
+  return out
+}
+
+// ---------- R5/R6 (SHA-2 / AES-256) ----------
+
+/** Algorithm 2.B (R6) — or plain SHA-256 for R5. */
+function hash2B(pwd, salt, udata, R) {
+  let K = sha256(concat([pwd, salt, udata]))
+  if (R === 5) return K
+  for (let round = 0; ; round++) {
+    const unit = concat([pwd, K, udata])
+    const K1 = new Uint8Array(unit.length * 64)
+    for (let i = 0; i < 64; i++) K1.set(unit, i * unit.length)
+    const E = aesCbcEncrypt(K.subarray(0, 16), K.subarray(16, 32), K1, false)
+    let sum = 0
+    for (let i = 0; i < 16; i++) sum += E[i]
+    const m = sum % 3
+    K = m === 0 ? sha256(E) : m === 1 ? sha384(E) : sha512(E)
+    if (round >= 63 && E[E.length - 1] <= round - 32) break
+  }
+  return K.slice(0, 32)
+}
+
+const ZERO_IV = new Uint8Array(16)
+
+// ---------- encrypt-dict analysis ----------
+
+/**
+ * Authenticate a password against a Standard-handler encrypt dict.
+ * Returns {fileKey, stm, str, R, V, P, encryptMeta, owner} where stm/str are
+ * 'RC4' | 'AESV2' | 'AESV3' | 'None'. Throws 'wrong password' / 'unsupported …'.
+ */
+function authenticate(doc, encDict, pwd) {
+  const dd = (v) => (isRef(v) ? deref(doc, v) : v)
+  const filt = dd(get(encDict, 'Filter'))
+  if (!isName(filt) || filt.v !== 'Standard') throw new Error('unsupported security handler (certificate-encrypted PDFs need the original certificate)')
+  const V = dd(get(encDict, 'V')) ?? 0
+  const R = dd(get(encDict, 'R')) ?? 2
+  const P = dd(get(encDict, 'P')) ?? -4
+  const encryptMeta = dd(get(encDict, 'EncryptMetadata')) !== false
+  const O = dd(get(encDict, 'O'))?.bytes
+  const U = dd(get(encDict, 'U'))?.bytes
+  if (!O || !U) throw new Error('unsupported encryption (missing O/U)')
+
+  // crypt filter selection
+  let stm = 'RC4', str = 'RC4'
+  if (V >= 4) {
+    const cf = dd(get(encDict, 'CF'))
+    const method = (sel) => {
+      const sn = dd(get(encDict, sel))
+      const nm = isName(sn) ? sn.v : 'Identity'
+      if (nm === 'Identity') return 'None'
+      const f = cf instanceof Map ? dd(cf.get(nm)) : null
+      const cfm = f instanceof Map ? dd(get(f, 'CFM')) : null
+      const m = isName(cfm) ? cfm.v : 'None'
+      if (m === 'V2') return 'RC4'
+      if (m === 'AESV2' || m === 'AESV3' || m === 'None') return m
+      throw new Error(`unsupported crypt filter ${m}`)
+    }
+    stm = method('StmF')
+    str = method('StrF')
+  } else if (V !== 1 && V !== 2) {
+    throw new Error(`unsupported encryption version V=${V}`)
+  }
+
+  if (R >= 5) {
+    const OE = dd(get(encDict, 'OE'))?.bytes
+    const UE = dd(get(encDict, 'UE'))?.bytes
+    if (!OE || !UE) throw new Error('unsupported encryption (missing OE/UE)')
+    const pw = pwdUtf8(pwd)
+    const U48 = U.subarray(0, 48)
+    if (bytesEq(hash2B(pw, U.subarray(32, 40), new Uint8Array(0), R), U, 32)) {
+      const ik = hash2B(pw, U.subarray(40, 48), new Uint8Array(0), R)
+      return { fileKey: aesCbcDecrypt(ik, ZERO_IV, UE, false), stm, str, R, V, P, encryptMeta, owner: false }
+    }
+    if (bytesEq(hash2B(pw, O.subarray(32, 40), U48, R), O, 32)) {
+      const ik = hash2B(pw, O.subarray(40, 48), U48, R)
+      return { fileKey: aesCbcDecrypt(ik, ZERO_IV, OE, false), stm, str, R, V, P, encryptMeta, owner: true }
+    }
+    throw new Error('wrong password')
+  }
+
+  const id0 = doc.trailer && get(doc.trailer, 'ID')?.[0]?.bytes
+  if (!id0) throw new Error('unsupported encryption (missing document ID)')
+  const keyLen = V === 1 ? 5 : Math.min(16, ((dd(get(encDict, 'Length')) ?? 40) / 8) | 0) || 5
+  const uOk = (key) => {
+    const u = computeU(key, id0, R)
+    return bytesEq(u, U, R === 2 ? 32 : 16)
+  }
+  let fileKey = computeFileKey(pwdPad(pwd), O, P, id0, keyLen, R, encryptMeta)
+  if (uOk(fileKey)) return { fileKey, stm, str, R, V, P, encryptMeta, owner: false }
+  // owner password → recover the user pad from O
+  let d = md5(pwdPad(pwd))
+  if (R >= 3) for (let i = 0; i < 50; i++) d = md5(d.subarray(0, keyLen))
+  const ok = d.subarray(0, keyLen)
+  let userPad = O.subarray(0, 32)
+  if (R === 2) userPad = rc4(ok, userPad)
+  else for (let i = 19; i >= 0; i--) userPad = rc4(xorKey(ok, i), userPad)
+  fileKey = computeFileKey(userPad, O, P, id0, keyLen, R, encryptMeta)
+  if (uOk(fileKey)) return { fileKey, stm, str, R, V, P, encryptMeta, owner: true }
+  throw new Error('wrong password')
+}
+
+/** Per-object key for RC4 / AESV2; AESV3 uses the file key directly. */
+function objectKey(fileKey, n, g, method) {
+  if (method === 'AESV3') return fileKey
+  const parts = [fileKey, new Uint8Array([n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff, g & 0xff, (g >> 8) & 0xff])]
+  if (method === 'AESV2') parts.push(new Uint8Array([0x73, 0x41, 0x6c, 0x54])) // "sAlT"
+  return md5(concat(parts)).subarray(0, Math.min(fileKey.length + 5, 16))
+}
+
+function cryptBytes(method, key, bytes, encrypt) {
+  if (method === 'None') return bytes
+  if (method === 'RC4') return rc4(key, bytes)
+  if (encrypt) {
+    const iv = randomBytes(16)
+    return concat([iv, aesCbcEncrypt(key, iv, bytes, true)])
+  }
+  if (bytes.length < 16) return new Uint8Array(0)
+  return aesCbcDecrypt(key, bytes.subarray(0, 16), bytes.subarray(16), true)
+}
+
+/** Apply the cipher to every string and stream inside one object value. */
+function cryptObject(v, n, g, sec, encrypt) {
+  const sk = objectKey(sec.fileKey, n, g, sec.str)
+  const tk = objectKey(sec.fileKey, n, g, sec.stm)
+  const walk = (x) => {
+    if (x instanceof Map) { for (const y of x.values()) walk(y) }
+    else if (Array.isArray(x)) { for (const y of x) walk(y) }
+    else if (x?.k === 's' || x?.k === 'x') x.bytes = cryptBytes(sec.str, sk, x.bytes, encrypt)
+  }
+  if (isStream(v)) {
+    walk(v.dict)
+    const isMeta = typeIs(v.dict, 'Metadata')
+    if (!(isMeta && !sec.encryptMeta)) {
+      v.data = cryptBytes(sec.stm, tk, v.data, encrypt)
+      if (!encrypt) v.dict.set('Length', v.data.length)
+    }
+  } else walk(v)
+}
+
+/** Deep-clone one value, remapping refs through refMap. */
+function cloneVal(v, refMap) {
+  if (isRef(v)) return refMap.get(`${v.n} ${v.g}`) ?? null
+  if (v instanceof Map) {
+    const m = new Map()
+    for (const [k, x] of v) m.set(k, cloneVal(x, refMap))
+    return m
+  }
+  if (Array.isArray(v)) return v.map((x) => cloneVal(x, refMap))
+  if (isStream(v)) return stream(cloneVal(v.dict, refMap), v.data.slice())
+  if (v?.k === 's' || v?.k === 'x') return { ...v, bytes: v.bytes.slice() }
+  return v
+}
+
+/** Copy every object (minus skip keys and xref streams) into dst; returns maps + root number. */
+function cloneDoc(src, dst, skip = new Set()) {
+  const numOf = new Map()
+  const refMap = new Map()
+  for (const [key, ent] of src.objects) {
+    if (skip.has(key)) continue
+    const dict = isStream(ent.v) ? ent.v.dict : ent.v
+    if (typeIs(dict, 'XRef')) { skip.add(key); continue } // writer emits its own xref
+    numOf.set(key, dst.alloc())
+  }
+  for (const [k, num] of numOf) refMap.set(k, ref(num, 0))
+  for (const [key, ent] of src.objects) {
+    if (skip.has(key)) continue
+    dst.set(numOf.get(key), cloneVal(ent.v, refMap))
+  }
+  const rootRef = get(src.trailer, 'Root')
+  return { numOf, refMap, rootNum: numOf.get(`${rootRef.n} ${rootRef.g}`) }
+}
+
+const mapInfo = (src, numOf, refMap, trailer) => {
+  const infoRef = get(src.trailer, 'Info')
+  if (isRef(infoRef)) {
+    const mapped = numOf.get(`${infoRef.n} ${infoRef.g}`)
+    if (mapped) trailer.set('Info', ref(mapped, 0))
+  } else if (infoRef instanceof Map) trailer.set('Info', cloneVal(infoRef, refMap))
+}
+
+/** Is this file encrypted? (cheap check for the UI) */
+async function isEncrypted(bytes) {
+  const doc = await parsePdf(bytes, [], true)
+  return !!get(doc.trailer, 'Encrypt')
+}
+
+/**
+ * Unlock a protected PDF with the user OR owner password → unprotected bytes.
+ * Throws 'wrong password' when neither authenticates.
+ */
+async function decryptPdf(bytes, pwd) {
+  const src = await parsePdf(bytes, [], true)
+  const encRef = get(src.trailer, 'Encrypt')
+  if (!encRef) return bytes
+  const encDict = isRef(encRef) ? deref(src, encRef) : encRef
+  const sec = authenticate(src, encDict, pwd)
+  // encrypted object streams: parsePdf unpacked nothing useful from ciphertext,
+  // so decrypt each container with its own key and unpack its objects now
+  const objStmKeys = new Set()
+  const unpacked = new Set() // inner objects are plaintext already
+  for (const [key, ent] of src.objects) {
+    const v = ent.v
+    if (!isStream(v) || !typeIs(v.dict, 'ObjStm')) continue
+    const N = get(v.dict, 'N'), first = get(v.dict, 'First')
+    if (typeof N !== 'number' || typeof first !== 'number') continue
+    const [n, g] = key.split(' ').map(Number)
+    const plain = cryptBytes(sec.stm, objectKey(sec.fileKey, n, g, sec.stm), v.data, false)
+    const data = await streamData({ dict: v.dict, data: plain })
+    if (!data) continue
+    objStmKeys.add(key)
+    const header = dec(data.slice(0, first)).trim().split(/\s+/).map(Number)
+    for (let i = 0; i < N; i++) {
+      const num = header[i * 2], off = header[i * 2 + 1]
+      try {
+        const [v2] = parseValue(data, first + off)
+        const k2 = `${num} 0`
+        if (!src.objects.has(k2)) { // a directly-scanned object is the newer revision
+          src.objects.set(k2, { n: num, g: 0, v: v2 })
+          unpacked.add(k2)
+        }
+      } catch { /* skip malformed inner object */ }
+    }
+  }
+  const encKey = isRef(encRef) ? `${encRef.n} ${encRef.g}` : null
+  const skip = new Set([...objStmKeys, ...(encKey ? [encKey] : [])])
+  const dst = newDoc()
+  const { numOf, refMap, rootNum } = cloneDoc(src, dst, skip)
+  // keys bind to SOURCE object ids — never to the renumbered clones
+  for (const [key] of src.objects) {
+    if (skip.has(key) || unpacked.has(key)) continue
+    const [n, g] = key.split(' ').map(Number)
+    cryptObject(dst.objects.get(numOf.get(key)), n, g, sec, false)
+  }
+  const id0 = get(src.trailer, 'ID')?.[0]?.bytes ?? md5(bytes.subarray(0, 4096))
+  const trailer = new Map([['ID', [{ k: 'x', bytes: id0 }, { k: 'x', bytes: md5(concat([id0, enc('unlocked')])) }]]])
+  mapInfo(src, numOf, refMap, trailer)
+  return writeDoc(dst, rootNum, trailer)
+}
+
+/**
+ * Permission flags → /P. perms: {print, printHigh, copy, modify, annotate, fill, assemble, accessibility}
+ * (all default true — the password gates opening, flags restrict what readers allow after).
+ */
+function permBits(perms = {}) {
+  const on = (k) => perms[k] !== false
+  let p = 0xfffff0c0 | 0 // reserved bits set, 1-2 clear
+  if (on('print')) p |= 1 << 2
+  if (on('modify')) p |= 1 << 3
+  if (on('copy')) p |= 1 << 4
+  if (on('annotate')) p |= 1 << 5
+  if (on('fill')) p |= 1 << 8
+  if (on('accessibility')) p |= 1 << 9
+  if (on('assemble')) p |= 1 << 10
+  if (on('print') && perms.printHigh !== false) p |= 1 << 11
+  return p | 0
+}
+
+/**
+ * Password-protect a PDF.
+ * opts.method: 'aes256' (default, R6) | 'aes128' (R4) | 'rc4' (R3, legacy)
+ * opts.ownerPwd: defaults to userPwd. opts.perms: see permBits.
+ * An empty user password + owner password = opens freely, restrictions apply.
+ */
+async function protectPdf(bytes, userPwd, { ownerPwd, method = 'aes256', perms } = {}) {
+  let src = await parsePdf(bytes, [], true)
+  if (get(src.trailer, 'Encrypt')) throw new Error('this PDF is already protected — unlock it first')
+  const dst = newDoc()
+  const { numOf, refMap, rootNum } = cloneDoc(src, dst)
+  const P = permBits(perms)
+  const owner = ownerPwd || userPwd
+  const srcId = get(src.trailer, 'ID')
+  const id0 = Array.isArray(srcId) && srcId[0]?.bytes?.length ? srcId[0].bytes.slice(0, 16) : randomBytes(16)
+  const id1 = randomBytes(16)
+  let sec, encDict
+  if (method === 'aes256') {
+    const fileKey = randomBytes(32)
+    const upw = pwdUtf8(userPwd), opw = pwdUtf8(owner)
+    const uvs = randomBytes(8), uks = randomBytes(8), ovs = randomBytes(8), oks = randomBytes(8)
+    const none = new Uint8Array(0)
+    const U = concat([hash2B(upw, uvs, none, 6), uvs, uks])
+    const UE = aesCbcEncrypt(hash2B(upw, uks, none, 6), ZERO_IV, fileKey, false)
+    const O = concat([hash2B(opw, ovs, U, 6), ovs, oks])
+    const OE = aesCbcEncrypt(hash2B(opw, oks, U, 6), ZERO_IV, fileKey, false)
+    const permsBlock = concat([le32(P), new Uint8Array([255, 255, 255, 255]), enc('Tadb'), randomBytes(4)])
+    const Perms = aesCbcEncrypt(fileKey, ZERO_IV, permsBlock, false)
+    sec = { fileKey, stm: 'AESV3', str: 'AESV3', encryptMeta: true }
+    encDict = new Map([
+      ['Filter', name('Standard')], ['V', 5], ['R', 6], ['Length', 256], ['P', P],
+      ['CF', new Map([['StdCF', new Map([['AuthEvent', name('DocOpen')], ['CFM', name('AESV3')], ['Length', 32]])]])],
+      ['StmF', name('StdCF')], ['StrF', name('StdCF')],
+      ['O', { k: 'x', bytes: O }], ['U', { k: 'x', bytes: U }],
+      ['OE', { k: 'x', bytes: OE }], ['UE', { k: 'x', bytes: UE }], ['Perms', { k: 'x', bytes: Perms }],
+    ])
+  } else {
+    const R = method === 'aes128' ? 4 : 3
+    const uPad = pwdPad(userPwd)
+    const O = computeO(pwdPad(owner), uPad, 16, R)
+    const fileKey = computeFileKey(uPad, O, P, id0, 16, R, true)
+    const U = computeU(fileKey, id0, R)
+    const m = method === 'aes128' ? 'AESV2' : 'RC4'
+    sec = { fileKey, stm: m, str: m, encryptMeta: true }
+    encDict = new Map([['Filter', name('Standard')], ['V', R === 4 ? 4 : 2], ['R', R], ['Length', 128], ['P', P],
+      ['O', { k: 'x', bytes: O }], ['U', { k: 'x', bytes: U }]])
+    if (R === 4) {
+      encDict.set('CF', new Map([['StdCF', new Map([['AuthEvent', name('DocOpen')], ['CFM', name('AESV2')], ['Length', 16]])]]))
+      encDict.set('StmF', name('StdCF'))
+      encDict.set('StrF', name('StdCF'))
+    }
+  }
+  for (const [num, v] of dst.objects) cryptObject(v, num, 0, sec, true)
+  const encNum = dst.alloc()
+  dst.set(encNum, encDict)
+  const trailer = new Map([['Encrypt', ref(encNum, 0)], ['ID', [{ k: 'x', bytes: id0 }, { k: 'x', bytes: id1 }]]])
+  mapInfo(src, numOf, refMap, trailer)
+  src = null
+  return writeDoc(dst, rootNum, trailer)
 }
 
 // ---- src/pdf/render.js ----

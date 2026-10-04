@@ -37,9 +37,12 @@ export function zlibStore(data) {
   return out.subarray(0, o)
 }
 
-/** pixels: Uint8Array of RGB or grayscale samples. gray=true → 1 byte/px, else 3. */
-export function pngEncode(width, height, pixels, gray = false) {
-  const bpp = gray ? 1 : 3
+/**
+ * pixels: Uint8Array of samples. channels: true → gray (1), false → RGB (3),
+ * or a number: 1 gray, 2 gray+alpha, 3 RGB, 4 RGBA.
+ */
+export function pngEncode(width, height, pixels, channels = false) {
+  const bpp = channels === true ? 1 : channels === false ? 3 : channels
   const stride = width * bpp
   if (pixels.length !== stride * height) throw new Error('pixel buffer size mismatch')
 
@@ -70,7 +73,7 @@ export function pngEncode(width, height, pixels, gray = false) {
   dv.setUint32(0, width)
   dv.setUint32(4, height)
   ihdr[8] = 8 // bit depth
-  ihdr[9] = gray ? 0 : 2 // color type
+  ihdr[9] = { 1: 0, 2: 4, 3: 2, 4: 6 }[bpp] // color type
   // compression/filter/interlace = 0
 
   const sig = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])

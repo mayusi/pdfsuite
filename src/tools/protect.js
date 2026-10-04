@@ -1,7 +1,7 @@
 import { h, readBytes, saveBlob, setKids } from '../ui/dom.js'
 import { Btn, Card, DropZone, ErrorText } from '../ui/widgets.js'
 import { parsePdf } from '../pdf/parse.js'
-import { decryptPdf, protectPdf } from '../pdf/ops.js'
+import { decryptPdf, protectPdf } from '../pdf/security.js'
 
 export function Protect() {
   let file = null

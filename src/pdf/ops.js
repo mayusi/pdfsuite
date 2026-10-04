@@ -1,10 +1,12 @@
 import { concat, dec, enc, get, isHex, isName, isRef, isStream, isStr, name, ref, set, stream, typeIs } from './types.js'
 import { deref, parsePdf, parseValue } from './parse.js'
 import { newDoc, writeDoc } from './write.js'
-import { deflate, inflate } from './env.js'
-import { md5, rc4 } from './crypto.js'
+import { deflate } from './env.js'
 import { pngEncode } from '../png.js'
 import { crc32 } from '../zip.js'
+import { decodeChain } from './filters.js'
+import { decodeImage } from './image.js'
+import { simpleEncodingTable } from './encodings.js'
 
 const INHERITED = ['Resources', 'MediaBox', 'CropBox', 'Rotate']
 
@@ -738,19 +740,43 @@ export async function scrubPdf(bytes) {
 /** Page text, lines reassembled by position (top→bottom, left→right). */
 export async function pageText(doc, leaf) {
   const { ops } = await collectDrawOps(doc, leaf)
-  const texts = ops.filter((o) => o.t === 'text' && o.str).sort((a, b) => a.y - b.y || a.x - b.x)
+  return textFromOps(ops)
+}
+
+/**
+ * Text ops → reading-order text. Runs are grouped into lines by baseline, then
+ * joined by GEOMETRY: a space only where the gap between runs is wider than a
+ * fraction of the font size. (Kerned TJ arrays and per-glyph positioning emit
+ * one op per fragment — joining those with blanks gives "Quar t erly".)
+ */
+export function textFromOps(ops) {
+  const texts = ops.filter((o) => o.t === 'text' && o.str && Math.abs(o.rot ?? 0) < 0.3)
+    .sort((a, b) => a.y - b.y || a.x - b.x)
   const lines = []
   let cur = []
+  let lineY = 0
   for (const t of texts) {
-    const last = cur[cur.length - 1]
-    if (last && Math.abs(t.y - last.y) > Math.max(2, t.h * 0.5)) { lines.push(cur); cur = [] }
+    if (cur.length && Math.abs(t.y - lineY) > Math.max(2, Math.min(t.h, cur[0].h) * 0.5)) { lines.push(cur); cur = [] }
+    if (!cur.length) lineY = t.y
     cur.push(t)
   }
   if (cur.length) lines.push(cur)
-  return lines
-    .map((l) => l.sort((a, b) => a.x - b.x).map((t) => t.str).join(' ').replace(/\s+/g, ' ').trim())
-    .filter(Boolean)
-    .join('\n')
+  // vertical / rotated runs: their own lines, kept in stream order
+  const rotated = ops.filter((o) => o.t === 'text' && o.str && Math.abs(o.rot ?? 0) >= 0.3).map((o) => o.str.trim()).filter(Boolean)
+  const out = lines.map((l) => {
+    l.sort((a, b) => a.x - b.x)
+    let s = ''
+    let end = -Infinity
+    for (const t of l) {
+      const size = t.size || t.h || 10
+      const gap = t.x - end
+      if (s && gap > size * 0.18 && !s.endsWith(' ') && !t.str.startsWith(' ')) s += ' '
+      s += t.str
+      end = Math.max(end, t.x + t.w)
+    }
+    return s.replace(/[ﬀ-ﬆ]/g, (c) => c.normalize('NFKC')).replace(/\s+/g, ' ').trim()
+  }).filter(Boolean)
+  return [...out, ...rotated].join('\n')
 }
 
 /** All pages → ['page 1 text', ...]. */
@@ -795,291 +821,30 @@ export async function compressPdf(bytes, { reimage } = {}) {
         continue
       }
     }
-    // multi-filter chains carry per-filter DecodeParms arrays — collapsing to a
-    // single FlateDecode would misalign them, so leave those streams as-is.
-    const fArr = get(v.dict, 'Filter')
-    if (Array.isArray(fArr)) continue
+    // streamData undoes the whole chain incl. predictors, so the re-deflated
+    // bytes are raw — DecodeParms no longer applies and must go with the old filters.
     const raw = await streamData(v)
     if (raw === null) continue
     const packed = await deflate(raw)
     if (packed.length < v.data.length) {
       v.data = packed
       v.dict.set('Filter', name('FlateDecode'))
-      // dict-form DecodeParms stays: the re-deflated data is still
-      // predictor-coded, so the parms still describe it correctly.
+      v.dict.delete('DecodeParms')
+      v.dict.delete('DP')
     }
   }
   const out = writeDoc(dst, catNum, trailer)
   return { bytes: out, before: bytes.length, after: out.length }
 }
 
-// ---------- password protect (Standard handler, V=2 R=3, RC4-128) ----------
-
-const PAD32 = new Uint8Array([
-  0x28, 0xbf, 0x4e, 0x5e, 0x4e, 0x75, 0x8a, 0x41, 0x64, 0x00, 0x4e, 0x56, 0xff, 0xfa, 0x01, 0x08,
-  0x2e, 0x2e, 0x00, 0xb6, 0xd0, 0x68, 0x3e, 0x80, 0x2f, 0x0c, 0xa9, 0xfe, 0x64, 0x53, 0x69, 0x7a,
-])
-
-const pwdPad = (s) => {
-  // Standard-handler passwords are byte strings; non-Latin-1 input would be
-  // mangled differently by every reader — refuse rather than lock the user out
-  for (const c of s) {
-    if (c.codePointAt(0) > 0xff) throw new Error('password must use Latin-1 characters only')
-  }
-  const b = Uint8Array.from(s, (c) => c.charCodeAt(0) & 0xff)
-  const out = new Uint8Array(32)
-  out.set(b.subarray(0, 32))
-  if (b.length < 32) out.set(PAD32.subarray(0, 32 - b.length), b.length)
-  return out
-}
-
-const xorKey = (key, i) => Uint8Array.from(key, (b) => b ^ i)
-
-/** R≥3 owner-key: 50×MD5 then 20 RC4 rounds. */
-function computeO(ownerPad, userPad, keyLen) {
-  let d = md5(ownerPad)
-  for (let i = 0; i < 50; i++) d = md5(d.subarray(0, keyLen))
-  const ok = d.subarray(0, keyLen)
-  let data = userPad
-  for (let i = 0; i < 20; i++) data = rc4(xorKey(ok, i), data)
-  return data
-}
-
-/** File key: MD5(pad ‖ O ‖ P‖ ID0); R≥3 adds 50×MD5 of the first keyLen bytes. */
-function computeFileKey(userPad, O, P, id0, keyLen, R) {
-  const le = new Uint8Array(4)
-  new DataView(le.buffer).setInt32(0, P, true)
-  let d = md5(concat([userPad, O, le, id0]))
-  if (R >= 3) for (let i = 0; i < 50; i++) d = md5(d.subarray(0, keyLen))
-  return d.subarray(0, keyLen)
-}
-
-/** R≥3 /U: 20 RC4 rounds over MD5(PAD ‖ ID0) + 16 pad bytes. */
-function computeU(fileKey, id0) {
-  let data = md5(concat([PAD32, id0]))
-  for (let i = 0; i < 20; i++) data = rc4(xorKey(fileKey, i), data)
-  const out = new Uint8Array(32)
-  out.set(data)
-  out.set(md5(fileKey), 16)
-  return out
-}
-
-const objKey = (fileKey, n, g) =>
-  md5(concat([fileKey, new Uint8Array([n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff, g & 0xff, (g >> 8) & 0xff])])).subarray(0, 16)
-
-/** RC4 every string/hex/stream inside a value with the object's key. */
-function rc4Walk(v, ok) {
-  if (v instanceof Map) for (const x of v.values()) rc4Walk(x, ok)
-  else if (Array.isArray(v)) for (const x of v) rc4Walk(x, ok)
-  else if (v?.k === 's' || v?.k === 'x') v.bytes = rc4(ok, v.bytes)
-  else if (isStream(v)) { rc4Walk(v.dict, ok); v.data = rc4(ok, v.data) }
-}
-
-/** Deep-clone one object, remapping refs through a pre-filled map. */
-const cloneVal = (v, refMap) => {
-  if (isRef(v)) return refMap.get(`${v.n} ${v.g}`) ?? null
-  if (v instanceof Map) {
-    const m = new Map()
-    for (const [k, x] of v) m.set(k, cloneVal(x, refMap))
-    return m
-  }
-  if (Array.isArray(v)) return v.map((x) => cloneVal(x, refMap))
-  if (isStream(v)) return stream(cloneVal(v.dict, refMap), v.data.slice())
-  if (v?.k === 's' || v?.k === 'x') return { ...v, bytes: v.bytes.slice() }
-  return v
-}
-
-/** Full-copy every src object into dst (minus `skip` keys); returns {numOf, rootNum}. */
-function cloneDoc(src, dst, skip = new Set()) {
-  const numOf = new Map()
-  const refMap = new Map()
-  for (const key of src.objects.keys()) if (!skip.has(key)) numOf.set(key, dst.alloc())
-  for (const [k, num] of numOf) refMap.set(k, ref(num, 0))
-  for (const [key, ent] of src.objects) {
-    if (skip.has(key)) continue
-    dst.set(numOf.get(key), cloneVal(ent.v, refMap))
-  }
-  const rootRef = get(src.trailer, 'Root')
-  return { numOf, refMap, rootNum: numOf.get(`${rootRef.n} ${rootRef.g}`) }
-}
-
-const PERMS = -4 // print + copy + modify allowed; password gates opening
-
-/**
- * Password-protect a PDF (Standard security handler, RC4-128, R=3).
- * Opens in every real PDF reader with the user password; owner password
- * defaults to the user password.
- */
-export function protectPdf(bytes, userPwd, { ownerPwd } = {}) {
-  return parsePdf(bytes).then((src) => {
-    const dst = newDoc()
-    const { numOf, refMap, rootNum } = cloneDoc(src, dst)
-    const srcId = get(src.trailer, 'ID')
-    const id0 = Array.isArray(srcId) && srcId[0]?.bytes
-      ? srcId[0].bytes.slice(0, 16)
-      : md5(concat([bytes.slice(0, 1024), enc(String(bytes.length))]))
-    const id1 = md5(concat([id0, pwdPad(userPwd)]))
-    const uPad = pwdPad(userPwd)
-    const O = computeO(pwdPad(ownerPwd ?? userPwd), uPad, 16)
-    const fileKey = computeFileKey(uPad, O, PERMS, id0, 16, 3)
-    const U = computeU(fileKey, id0)
-    for (const [num, v] of dst.objects) rc4Walk(v, objKey(fileKey, num, 0))
-    const encNum = dst.alloc()
-    dst.set(encNum, new Map([
-      ['Filter', name('Standard')], ['V', 2], ['R', 3], ['Length', 128], ['P', PERMS],
-      ['O', { k: 'x', bytes: O }], ['U', { k: 'x', bytes: U }],
-    ]))
-    const trailer = new Map([
-      ['Encrypt', ref(encNum, 0)],
-      ['ID', [{ k: 'x', bytes: id0 }, { k: 'x', bytes: id1 }]],
-    ])
-    const infoRef = get(src.trailer, 'Info')
-    if (isRef(infoRef)) {
-      const mapped = numOf.get(`${infoRef.n} ${infoRef.g}`)
-      if (mapped) trailer.set('Info', ref(mapped, 0))
-    } else if (infoRef instanceof Map) {
-      trailer.set('Info', cloneVal(infoRef, refMap))
-    }
-    return writeDoc(dst, rootNum, trailer)
-  })
-}
-
-/**
- * Validate the encrypt dict is a mode we actually implement — Standard
- * handler, RC4 (V≤2, crypt filters absent or all CFM=/V2), R∈{2,3}.
- * Anything else (AES, public-key, R≥4 extensions) throws rather than
- * silently emitting a corrupt unlock.
- */
-function checkEncryptDict(encDict, src) {
-  const dd = (v) => (isRef(v) ? deref(src, v) : v)
-  const filt = dd(get(encDict, 'Filter'))
-  if (!isName(filt) || filt.v !== 'Standard') throw new Error('unsupported security handler')
-  const V = dd(get(encDict, 'V')) ?? 0
-  const R = dd(get(encDict, 'R')) ?? 2
-  if (V > 2 || R > 3 || R < 2) throw new Error('unsupported encryption (AES or newer revision)')
-  let cf = dd(get(encDict, 'CF'))
-  if (cf instanceof Map) {
-    const cfmName = (n) => {
-      const cfm = dd(get(dd(cf.get(n)), 'CFM'))
-      return isName(cfm) ? cfm.v : 'V2'
-    }
-    for (const cfv of cf.values()) {
-      const cfm = dd(get(dd(cfv), 'CFM'))
-      if (isName(cfm) && cfm.v !== 'V2' && cfm.v !== 'None')
-        throw new Error('unsupported crypt filter (' + cfm.v + ')')
-    }
-    // the filters actually selected for streams/strings must be RC4 —
-    // /None or anything else means partial encryption we can't walk safely
-    for (const sel of ['StmF', 'StrF']) {
-      const sn = dd(get(encDict, sel))
-      if (isName(sn) && sn.v !== 'Identity' && cfmName(sn.v) !== 'V2')
-        throw new Error('unsupported selective crypt filter (' + sn.v + ')')
-    }
-  }
-  const keyLen = V === 2 ? Math.min(16, ((dd(get(encDict, 'Length')) ?? 40) / 8) | 0) : 5
-  return { V, R, keyLen }
-}
-
-/**
- * Unlock a protected PDF with the user OR owner password → rebuilt
- * unprotected bytes. Supports Standard-handler RC4 (R2/R3); AES-encrypted
- * files throw a clear 'unsupported' error. Throws 'wrong password' if
- * neither password authenticates.
- */
-export async function decryptPdf(bytes, pwd) {
-  const src = await parsePdf(bytes, [], true)
-  const encRef = get(src.trailer, 'Encrypt')
-  if (!encRef) return bytes
-  const encDict = isRef(encRef) ? deref(src, encRef) : encRef
-  const { R, keyLen } = checkEncryptDict(encDict, src)
-  const O = get(encDict, 'O')?.bytes, U = get(encDict, 'U')?.bytes
-  const P = get(encDict, 'P') ?? PERMS
-  const idArr = get(src.trailer, 'ID')
-  const id0 = idArr?.[0]?.bytes
-  if (!O || !U || !id0) throw new Error('unsupported encryption')
-  const uMatch = (key) => {
-    if (R === 2) {
-      const data = rc4(key, PAD32)
-      return U.slice(0, 32).every((b, i) => b === data[i])
-    }
-    let data = md5(concat([PAD32, id0]))
-    for (let i = 0; i < 20; i++) data = rc4(xorKey(key, i), data)
-    return U.slice(0, 16).every((b, i) => b === data[i])
-  }
-  let fileKey = computeFileKey(pwdPad(pwd), O, P, id0, keyLen, R)
-  if (!uMatch(fileKey)) {
-    // owner-password path: recover the user pad from O
-    let d = md5(pwdPad(pwd))
-    if (R >= 3) for (let i = 0; i < 50; i++) d = md5(d.subarray(0, keyLen))
-    const ok = d.subarray(0, keyLen)
-    let data = O
-    if (R === 2) data = rc4(ok, data)
-    else for (let i = 19; i >= 0; i--) data = rc4(xorKey(ok, i), data)
-    fileKey = computeFileKey(data, O, P, id0, keyLen, R)
-    if (!uMatch(fileKey)) throw new Error('wrong password')
-  }
-  // encrypted object streams: parsePdf's ObjStm pass ran against ciphertext,
-  // so decrypt each container with its source key and unpack the objects now.
-  // (stream bytes are one encrypted unit — inner objects need no extra keys)
-  const objStmKeys = new Set()
-  const unpackedKeys = new Set() // inner objects: already plaintext — never rc4Walk
-  for (const [key, ent] of src.objects) {
-    const v = ent.v
-    if (!isStream(v) || !typeIs(v.dict, 'ObjStm')) continue
-    const N = get(v.dict, 'N'), first = get(v.dict, 'First')
-    if (typeof N !== 'number' || typeof first !== 'number') continue
-    const [n, g] = key.split(' ').map(Number)
-    const data = await streamData({ ...v, data: rc4(objKey(fileKey, n, g), v.data) }).catch(() => null)
-    if (!data) continue
-    objStmKeys.add(key)
-    const header = dec(data.slice(0, first)).trim().split(/\s+/).map(Number)
-    for (let i = 0; i < N; i++) {
-      const num = header[i * 2], off = header[i * 2 + 1]
-      try {
-        const [v2] = parseValue(data, first + off)
-        const k2 = `${num} 0`
-        if (!src.objects.has(k2)) {
-          src.objects.set(k2, { n: num, g: 0, v: v2 })
-          unpackedKeys.add(k2)
-        }
-      } catch { /* skip malformed inner object */ }
-    }
-  }
-  // decrypt each object keyed by its SOURCE object number/generation —
-  // encryption binds keys to the original ids, so keying on renumbered
-  // clones (as a naive copy would) produces garbage on any non-contiguous file
-  const encKey = isRef(encRef) ? `${encRef.n} ${encRef.g}` : null
-  const skip = new Set([...objStmKeys, ...(encKey ? [encKey] : [])])
-  const dst = newDoc()
-  const { numOf, refMap, rootNum } = cloneDoc(src, dst, skip)
-  for (const [key] of src.objects) {
-    if (skip.has(key) || unpackedKeys.has(key)) continue
-    const [n, g] = key.split(' ').map(Number)
-    rc4Walk(dst.objects.get(numOf.get(key)), objKey(fileKey, n, g))
-  }
-  const id1 = md5(concat([id0, enc('unlocked')]))
-  const trailer = new Map([['ID', [{ k: 'x', bytes: id0 }, { k: 'x', bytes: id1 }]]])
-  const infoRef = get(src.trailer, 'Info')
-  if (isRef(infoRef)) {
-    const mapped = numOf.get(`${infoRef.n} ${infoRef.g}`)
-    if (mapped) trailer.set('Info', ref(mapped, 0))
-  } else if (infoRef instanceof Map) {
-    trailer.set('Info', cloneVal(infoRef, refMap))
-  }
-  return writeDoc(dst, rootNum, trailer)
-}
-
-/** Decode one stream's FlateDecode filter chain → bytes (null if unsupported). */
+/** Decode a stream through its whole filter chain → bytes (null for image codecs / unsupported). */
 export async function streamData(s) {
-  let d = s.data
-  const fl = get(s.dict, 'Filter')
-  const chain = Array.isArray(fl) ? fl : fl ? [fl] : []
-  for (const f of chain) {
-    const fn = isName(f) ? f.v : null
-    if (fn === 'FlateDecode' || fn === 'Fl') d = await inflate(d)
-    else return null
+  try {
+    const { data, codec } = await decodeChain(s.dict, s.data, { stopAtImage: true })
+    return codec ? null : data
+  } catch {
+    return null
   }
-  return d
 }
 
 /** Concatenated, decoded Contents bytes for a page (null if undecodable). */
@@ -1314,6 +1079,8 @@ export async function fontMapFromRes(doc, res) {
     let fd = isRef(fref) ? deref(doc, fref) : fref
     if (isStream(fd)) fd = fd.dict
     if (!(fd instanceof Map)) continue
+    const hit = FONT_CACHE.get(fd)
+    if (hit) { out.set(fname, hit); continue }
     const info = { widths: null, firstChar: 0, wRanges: null, tounicode: null, codeLen: null, dw: 1000 }
     // Type0 fonts wrap a descendant CIDFont that carries /W + /DW; codes are
     // multi-byte (2 for Identity encodings) even without a ToUnicode map
@@ -1347,16 +1114,36 @@ export async function fontMapFromRes(doc, res) {
         } else i++
       }
     }
+    // style hints for the renderer + simple-font encoding table for text
+    let base = get(fd, 'BaseFont')
+    base = isName(base) ? base.v.replace(/^[A-Z]{6}\+/, '') : ''
+    let fdesc = get(cidFd, 'FontDescriptor') ?? get(fd, 'FontDescriptor')
+    if (isRef(fdesc)) fdesc = deref(doc, fdesc)
+    const flags = fdesc instanceof Map ? get(fdesc, 'Flags') ?? 0 : 0
+    const lname = base.toLowerCase()
+    info.base = base
+    info.bold = /bold|black|heavy|semibold|demi|,b/.test(lname) || (fdesc instanceof Map && (get(fdesc, 'FontWeight') ?? 400) >= 600)
+    info.italic = /italic|oblique|,i/.test(lname) || !!(flags & 64)
+    info.mono = /courier|mono|consol|menlo/.test(lname) || !!(flags & 1)
+    info.serif = !info.mono && (/times|serif|roman|georgia|garamond|cmr|cmti|cmbx|minion|palatino|book|cambria/.test(lname) || (!!(flags & 2) && !/sans|arial|helvetica|cmss/.test(lname)))
+    info.symbol = /symbol|dingbat/.test(lname)
+    if (!isCid) {
+      let encv = get(fd, 'Encoding')
+      if (isRef(encv)) encv = deref(doc, encv)
+      info.enc = simpleEncodingTable(encv, { symbolic: !!(flags & 4) && !encv })
+    }
     let tu = get(fd, 'ToUnicode')
     if (isRef(tu)) tu = deref(doc, tu)
     if (isStream(tu)) {
       const d = await streamData(tu).catch(() => null)
       if (d) info.tounicode = parseToUnicode(d)
     }
+    FONT_CACHE.set(fd, info)
     out.set(fname, info)
   }
   return out
 }
+const FONT_CACHE = new WeakMap() // font dict → parsed info (fonts repeat on every page)
 
 /** Decode a PDF string operand using a font entry (ToUnicode → latin1). */
 export function decodeString(bytes, font) {
@@ -1366,8 +1153,13 @@ export function decodeString(bytes, font) {
     for (let i = 0; i + codeLen <= bytes.length; i += codeLen) {
       let code = 0
       for (let k = 0; k < codeLen; k++) code = code * 256 + bytes[i + k]
-      out += map.get(code) ?? ''
+      out += map.get(code) ?? (codeLen === 1 && font.enc ? font.enc[code] : '')
     }
+    return out
+  }
+  if (font?.enc) {
+    let out = ''
+    for (let i = 0; i < bytes.length; i++) out += font.enc[bytes[i]]
     return out
   }
   // multi-byte codes without a map decode as the raw CID values
@@ -1825,96 +1617,35 @@ async function walkContent(doc, st, data, res, fonts) {
 
 // ---------- extract images ----------
 
-/** Undo PNG/TIFF predictors on inflated image data (DecodeParms). */
-export function unPredict(data, { predictor = 1, columns = 1, colors = 1, bpc = 8 }) {
-  if (predictor === 1) return data
-  const bpp = Math.max(1, Math.ceil((colors * bpc) / 8))
-  const rowBytes = Math.ceil((columns * colors * bpc) / 8)
-  if (predictor === 2) {
-    const out = new Uint8Array(data.length)
-    for (let y = 0; y * rowBytes < data.length; y++) {
-      const row = y * rowBytes
-      for (let x = 0; x < rowBytes; x++) {
-        const left = x >= bpp ? out[row + x - bpp] : 0
-        out[row + x] = (data[row + x] + left) & 0xff
-      }
-    }
-    return out
-  }
-  if (predictor < 10 || predictor > 15) throw new Error(`unsupported predictor ${predictor}`)
-  const hasFilterByte = predictor >= 10
-  const rowStride = rowBytes + (hasFilterByte ? 1 : 0)
-  const rows = Math.floor(data.length / rowStride)
-  const out = new Uint8Array(rows * rowBytes)
-  const paeth = (a, b, c) => {
-    const p = a + b - c
-    const pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c)
-    return pa <= pb && pa <= pc ? a : pb <= pc ? b : c
-  }
-  for (let y = 0; y < rows; y++) {
-    const src = y * rowStride + (hasFilterByte ? 1 : 0)
-    const f = hasFilterByte ? data[y * rowStride] : 1 // Optimum → sub? spec: treated as per-row
-    const prev = y > 0 ? (y - 1) * rowBytes : -1
-    for (let x = 0; x < rowBytes; x++) {
-      const a = x >= bpp ? out[y * rowBytes + x - bpp] : 0
-      const b = prev >= 0 ? out[prev + x] : 0
-      const c = x >= bpp && prev >= 0 ? out[prev + x - bpp] : 0
-      let v = data[src + x]
-      if (f === 1) v += a
-      else if (f === 2) v += b
-      else if (f === 3) v += (a + b) >> 1
-      else if (f === 4) v += paeth(a, b, c)
-      out[y * rowBytes + x] = v & 0xff
-    }
-  }
-  return out
-}
-
-/**
- * Pull embedded images out of a PDF.
- * Returns { images: [{name, data, w, h}], skipped } — DCTDecode→.jpg,
- * JPXDecode→.jp2, FlateDecode raw RGB/gray 8-bit→.png, else counted in skipped.
- */
 /**
  * Decode one image XObject stream → {data, mime, ext} or null when unsupported.
- * Applies the full /Filter chain in order; a trailing image codec (DCT/JPX)
- * names the format, everything else is unwrapped as compression.
+ * JPEG/JPEG2000 payloads are passed through untouched (lossless extraction);
+ * everything else is decoded through its colour space to PNG (alpha kept).
  */
 export async function decodeImageStream(doc, v) {
-  const w = get(v.dict, 'Width') ?? 0
-  const h = get(v.dict, 'Height') ?? 0
-  const filterVal = get(v.dict, 'Filter')
-  const chain = (Array.isArray(filterVal) ? filterVal : filterVal === undefined ? [] : [filterVal]).map(
-    (fl) => (isName(fl) ? fl.v : null),
-  )
-  const codec = { DCTDecode: ['.jpg', 'image/jpeg'], DCT: ['.jpg', 'image/jpeg'], JPXDecode: ['.jp2', 'image/jp2'], JPX: ['.jp2', 'image/jp2'] }
-  const last = chain.length ? chain[chain.length - 1] : null
-  const out = last ? codec[last] : undefined
-  const decodeChain = out ? chain.slice(0, -1) : chain
-  let data = v.data
-  for (const fl of decodeChain) {
-    if (fl === 'FlateDecode' || fl === 'Fl') data = await inflate(data)
-    else return null
+  const im = await decodeImage(doc, v)
+  if (!im) return null
+  if (im.kind === 'jpeg') return { data: im.data, mime: 'image/jpeg', ext: '.jpg', smask: im.smask, cmyk: im.cmyk, invert: im.invert }
+  if (im.kind === 'jpx') return { data: im.data, mime: 'image/jp2', ext: '.jp2' }
+  return { data: rgbaToPng(im.w, im.h, im.rgba), mime: 'image/png', ext: '.png', rgba: im.rgba, w: im.w, h: im.h }
+}
+
+/** RGBA → smallest faithful PNG (drops alpha / colour when unused). */
+export function rgbaToPng(w, h, rgba) {
+  let opaque = true, gray = true
+  for (let i = 0; i < rgba.length; i += 4) {
+    if (rgba[i + 3] !== 255) opaque = false
+    if (rgba[i] !== rgba[i + 1] || rgba[i] !== rgba[i + 2]) gray = false
+    if (!opaque && !gray) break
   }
-  if (out) return { data, mime: out[1], ext: out[0] }
-  // anything left in decodeChain is Flate by now — non-Flate returns above
-  const bpc = get(v.dict, 'BitsPerComponent') ?? 8
-  let cs = get(v.dict, 'ColorSpace')
-  if (isRef(cs)) cs = deref(doc, cs)
-  const csName = isName(cs) ? cs.v : Array.isArray(cs) && isName(cs[0]) ? cs[0].v : null
-  if (bpc !== 8 || (csName !== 'DeviceRGB' && csName !== 'DeviceGray')) return null
-  const colors = csName === 'DeviceRGB' ? 3 : 1
-  let dp = get(v.dict, 'DecodeParms') ?? get(v.dict, 'DP')
-  if (Array.isArray(dp)) dp = [...dp].reverse().find((x) => x instanceof Map)
-  const parms = dp instanceof Map ? {
-    predictor: get(dp, 'Predictor') ?? 1,
-    columns: get(dp, 'Columns') ?? w,
-    colors: get(dp, 'Colors') ?? colors,
-    bpc: get(dp, 'BitsPerComponent') ?? 8,
-  } : { predictor: 1, columns: w, colors, bpc: 8 }
-  const raw = unPredict(data, parms)
-  if (raw.length !== w * h * colors) return null
-  return { data: pngEncode(w, h, raw, colors === 1), mime: 'image/png', ext: '.png' }
+  const ch = (gray ? 1 : 3) + (opaque ? 0 : 1)
+  const px = new Uint8Array(w * h * ch)
+  for (let i = 0, o = 0; i < rgba.length; i += 4) {
+    px[o++] = rgba[i]
+    if (!gray) { px[o++] = rgba[i + 1]; px[o++] = rgba[i + 2] }
+    if (!opaque) px[o++] = rgba[i + 3]
+  }
+  return pngEncode(w, h, px, ch)
 }
 
 /**

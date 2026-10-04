@@ -26,3 +26,4 @@ dist-ssr
 .playwright-mcp/
 _scratch*
 _artifacts/
+.claude/

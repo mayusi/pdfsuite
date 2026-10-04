@@ -1,5 +1,5 @@
 import { dec, get, isName, isStream, name, ref, stream, str, hex, typeIs } from './types.js'
-import { inflate } from './env.js'
+import { decodeChain } from './filters.js'
 
 const WS = new Set([0x00, 0x09, 0x0a, 0x0c, 0x0d, 0x20])
 const DELIM = new Set([0x28, 0x29, 0x3c, 0x3e, 0x5b, 0x5d, 0x7b, 0x7d, 0x2f, 0x25])
@@ -61,9 +61,9 @@ export function parseValue(buf, i, allowStream = false) {
             const e = skipWs(buf, i)
             if (matchKeyword(buf, e, 'endstream')) i = e + 9
           } else {
-            const end = findMarker(buf, d, 'endstream')
+            const { end, at } = findMarker(buf, d, 'endstream')
             data = buf.slice(d, end)
-            i = end + 9
+            i = at + 9
           }
           return [stream(dict, data), i]
         }
@@ -193,9 +193,9 @@ function findMarker(buf, from, marker) {
     let end = i
     if (buf[end - 1] === 0x0a) end--
     if (buf[end - 1] === 0x0d) end--
-    return end
+    return { end, at: i }
   }
-  return buf.length
+  return { end: buf.length, at: buf.length }
 }
 
 const OBJ_RE = /(\d+)\s+(\d+)\s+obj\b/g
@@ -229,7 +229,7 @@ export async function parsePdf(bytes, warnings = [], allowEncrypted = false) {
     const first = get(v.dict, 'First')
     if (typeof N !== 'number' || typeof first !== 'number') continue
     try {
-      const data = await inflate(v.data)
+      const { data } = await decodeChain(v.dict, v.data)
       const headerEnd = first
       const header = dec(data.slice(0, headerEnd)).trim().split(/\s+/).map(Number)
       for (let i = 0; i < N; i++) {

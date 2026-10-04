@@ -2,7 +2,7 @@
 //   1. the normal site (index.html + styles.css + src/ modules) for GitHub Pages
 //   2. pdfsuite.html — the ENTIRE app inlined into one file. Double-click it and
 //      it runs with no server, no network, no modules — works over file://.
-import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 
 rmSync('dist', { recursive: true, force: true })
 mkdirSync('dist', { recursive: true })
@@ -15,11 +15,16 @@ const MODULES = [
   'src/pdf/types.js',
   'src/pdf/env.js',
   'src/pdf/crypto.js',
+  'src/pdf/filters.js',
   'src/pdf/parse.js',
   'src/pdf/write.js',
+  'src/pdf/encodings.js',
+  'src/pdf/functions.js',
+  'src/pdf/image.js',
   'src/zip.js',
   'src/png.js',
   'src/pdf/ops.js',
+  'src/pdf/security.js',
   'src/pdf/render.js',
   'src/ui/dom.js',
   'src/ui/widgets.js',
@@ -39,7 +44,13 @@ const MODULES = [
   'src/app.js',
 ]
 
+// every src module must be listed — a forgotten one fails at runtime, not here
+const listed = new Set(MODULES)
+const walk = (d) => readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(`${d}/${e.name}`) : e.name.endsWith('.js') ? [`${d}/${e.name}`] : []))
+for (const f of walk('src')) if (!listed.has(f)) throw new Error(`${f} is not in build.mjs MODULES`)
+
 let bundle = ''
+const seen = new Map() // top-level name → module (one shared scope in the bundle)
 for (const m of MODULES) {
   const src = readFileSync(m, 'utf8')
     .split('\n')
@@ -48,6 +59,10 @@ for (const m of MODULES) {
     .join('\n')
   if (/^import /m.test(src)) throw new Error(`multi-line import in ${m} — bundler can't handle it`)
   if (src.includes('</script>')) throw new Error(`literal </script> in ${m} would break inline bundle`)
+  for (const [, nm] of src.matchAll(/^(?:async\s+)?(?:function\*?|const|let|class)\s+([A-Za-z_$][\w$]*)/gm)) {
+    if (seen.has(nm)) throw new Error(`top-level name "${nm}" in ${m} collides with ${seen.get(nm)}`)
+    seen.set(nm, m)
+  }
   bundle += `\n// ---- ${m} ----\n${src}`
 }
 
