@@ -6029,6 +6029,10 @@ async function paintOps(ctx, doc, ops, scale, cache = new Map(), { hide = null, 
       if (!op.str || px < 3.2 || !op.gx) {
         // too small to read (thumbnails) or undecodable: draw an ink bar
         if (op.w * scale < 0.5) continue
+        if (hideGlyph) { // a run being edited mustn't reappear as a grey bar at low zoom
+          const cx = m[0] * (op.fs * 0.3) + m[2] * op.fs * 0.32 + m[4], cy = m[1] * (op.fs * 0.3) + m[3] * op.fs * 0.32 + m[5]
+          if (hideGlyph(cx, cy)) continue
+        }
         ctx.setTransform(scale * m[0], scale * m[1], scale * m[2], scale * m[3], scale * m[4], scale * m[5])
         ctx.globalAlpha = (op.a ?? 1) * 0.55
         ctx.fillStyle = rgb(op.fc)
