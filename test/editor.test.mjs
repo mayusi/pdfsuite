@@ -146,3 +146,22 @@ describe('editor geometry', () => {
     assert.deepEqual(s[s.length - 1], [10, 10, 3])
   })
 })
+
+describe('cropped pages', () => {
+  it('page size = CropBox, and edits land where they were drawn', async () => {
+    const c = 'BT /F1 12 Tf 60 650 Td (Inside crop) Tj ET'
+    const pdf = enc('%PDF-1.7\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n' +
+      '3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 800] /CropBox [50 100 550 700] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>\nendobj\n' +
+      `4 0 obj\n<< /Length ${c.length} >>\nstream\n${c}\nendstream\nendobj\n5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n`)
+    const inf = await info(pdf)
+    assert.deepEqual(inf.dims[0], { w: 500, h: 600, rotate: 0 })
+    const pages = [{ id: 'p', src: 0, rot: 0, w: 500, h: 600, annots: [{ t: 'rect', x: 10, y: 20, w: 30, h: 40, fill: '#ff0000' }] }]
+    const d = await parsePdf(await exportEdited(inf, pages))
+    const { ops, box } = await collectDrawOps(d, pageLeaves(d)[0])
+    assert.deepEqual(box, { w: 500, h: 600 })
+    const r = ops.find((o) => o.t === 'rect')
+    assert.ok(Math.abs(r.x - 10) < 0.5 && Math.abs(r.y - 20) < 0.5, JSON.stringify(r))
+    const t = ops.find((o) => o.t === 'text')
+    assert.ok(Math.abs(t.x - 10) < 0.5 && Math.abs(t.y - 50) < 0.5, `original text in crop space ${JSON.stringify([t.x, t.y])}`)
+  })
+})

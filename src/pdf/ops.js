@@ -6,7 +6,7 @@ import { pngEncode } from '../png.js'
 import { crc32 } from '../zip.js'
 import { decodeImage } from './image.js'
 import { readOutline, remapOutline, writeOutline } from './outline.js'
-import { collectDrawOps, pageText, streamData, textFromOps } from './content.js'
+import { collectDrawOps, pageBox, pageRotation, pageText, streamData, textFromOps } from './content.js'
 
 export const INHERITED = ['Resources', 'MediaBox', 'CropBox', 'Rotate']
 
@@ -48,12 +48,10 @@ export async function pageCount(bytes) {
 
 /** Per-page geometry for UI pickers: [{w, h, rotate}] — MediaBox + inherited Rotate. */
 export function pageDims(doc) {
+  // the VISIBLE box (CropBox ∩ MediaBox), exactly what rendering, the editor and stamping use
   return pageLeaves(doc).map((leaf) => {
-    let mb = get(leaf.dict, 'MediaBox') ?? leaf.inh.MediaBox
-    if (isRef(mb)) mb = deref(doc, mb)
-    if (!Array.isArray(mb)) mb = [0, 0, 612, 792]
-    const rot = get(leaf.dict, 'Rotate') ?? leaf.inh.Rotate ?? 0
-    return { w: Math.round(mb[2] - mb[0]), h: Math.round(mb[3] - mb[1]), rotate: typeof rot === 'number' ? rot : 0 }
+    const b = pageBox(doc, leaf)
+    return { w: +(b[2] - b[0]).toFixed(2), h: +(b[3] - b[1]).toFixed(2), rotate: pageRotation(doc, leaf) }
   })
 }
 
