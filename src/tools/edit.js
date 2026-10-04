@@ -2,7 +2,8 @@ import { h, setKids, readBytes, saveBlob, fmtBytes, icon } from '../ui/dom.js'
 import { Btn, DropZone, ErrorText, Toolbar, iconBtn } from '../ui/widgets.js'
 import { get } from '../pdf/types.js'
 import { parsePdf } from '../pdf/parse.js'
-import { pageLeaves, pageDims, annotatePdf } from '../pdf/ops.js'
+import { pageLeaves, pageDims } from '../pdf/ops.js'
+import { annotatePdf } from '../pdf/stamp.js'
 import { renderPage } from '../pdf/render.js'
 
 /**

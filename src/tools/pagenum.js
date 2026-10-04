@@ -1,6 +1,7 @@
 import { h, setKids, readBytes, saveBlob } from '../ui/dom.js'
 import { Btn, Card, DropZone, ErrorText } from '../ui/widgets.js'
-import { addPageNumbers, pageCount } from '../pdf/ops.js'
+import { pageCount } from '../pdf/ops.js'
+import { addPageNumbers } from '../pdf/stamp.js'
 
 const POSITIONS = [
   ['bc', 'Bottom center'], ['bl', 'Bottom left'], ['br', 'Bottom right'],

@@ -1,6 +1,6 @@
 import { h, readBytes, saveBlob, setKids } from '../ui/dom.js'
 import { Btn, Card, DropZone, ErrorText } from '../ui/widgets.js'
-import { watermarkPdf } from '../pdf/ops.js'
+import { watermarkPdf } from '../pdf/stamp.js'
 
 const ANGLES = [[-45, 'Diagonal ↗'], [45, 'Diagonal ↘'], [0, 'Horizontal']]
 const COLORS = [

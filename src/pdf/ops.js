@@ -7,8 +7,9 @@ import { crc32 } from '../zip.js'
 import { decodeChain } from './filters.js'
 import { decodeImage } from './image.js'
 import { simpleEncodingTable } from './encodings.js'
+import { readOutline, remapOutline, writeOutline } from './outline.js'
 
-const INHERITED = ['Resources', 'MediaBox', 'CropBox', 'Rotate']
+export const INHERITED = ['Resources', 'MediaBox', 'CropBox', 'Rotate']
 
 /** Walk the page tree → ordered leaves with resolved inherited attributes. */
 export function pageLeaves(doc) {
@@ -91,7 +92,7 @@ export async function readMetadata(bytes) {
 }
 
 /** Deep-copy a value across docs, remapping refs. */
-function copyValue(v, src, dst, refMap) {
+export function copyValue(v, src, dst, refMap) {
   if (isRef(v)) {
     const key = `${v.n} ${v.g}`
     if (refMap.has(key)) return refMap.get(key)
@@ -171,7 +172,7 @@ const CATALOG_EXTRAS = [
  * are given) → {catNum, trailer}. Kept separate from writeDoc so callers can
  * mutate copied objects (recompression) after extras are pulled in.
  */
-function buildCatalog(dst, pagesRef, kids, srcDoc, refMap) {
+function buildCatalog(dst, pagesRef, kids, srcDoc, refMap, { skip = [], noInfo = false } = {}) {
   dst.set(pagesRef, new Map([
     ['Type', name('Pages')],
     ['Kids', kids],
@@ -187,10 +188,11 @@ function buildCatalog(dst, pagesRef, kids, srcDoc, refMap) {
     const srcRoot = deref(srcDoc, get(srcDoc.trailer, 'Root'))
     const srcCat = isStream(srcRoot) ? srcRoot.dict : srcRoot
     for (const k of CATALOG_EXTRAS) {
+      if (skip.includes(k)) continue
       const v = get(srcCat, k)
       if (v !== undefined) catDict.set(k, copyValue(v, srcDoc, dst, refMap))
     }
-    const info = get(srcDoc.trailer, 'Info')
+    const info = noInfo ? null : get(srcDoc.trailer, 'Info')
     if (info) {
       const iv = copyValue(info, srcDoc, dst, refMap)
       if (iv !== null && iv !== undefined) trailer.set('Info', iv)
@@ -205,39 +207,189 @@ function buildCatalog(dst, pagesRef, kids, srcDoc, refMap) {
   return { catNum, trailer }
 }
 
-function finishDoc(dst, pagesRef, kids, srcDoc, refMap) {
+export function finishDoc(dst, pagesRef, kids, srcDoc, refMap) {
   const { catNum, trailer } = buildCatalog(dst, pagesRef, kids, srcDoc, refMap)
   return writeDoc(dst, catNum, trailer)
 }
 
-/** Merge several PDFs (Uint8Array[]) into one, in order. */
-export async function mergePdfs(inputs) {
+/**
+ * Assemble a new PDF from pages of one or more parsed docs.
+ * ops: [{doc, page (1-based), rotation?} | {blank: [w, h]}] in output order.
+ * opts.names: per-doc titles → merge bookmarks ("file.pdf" › its own outline).
+ * Bookmarks and form fields survive for pages that make it into the output;
+ * references to dropped pages become null instead of dragging the whole
+ * page (and its content) into the file as an orphan.
+ */
+async function assemble(docs, ops, { names = null, extrasFrom = null } = {}) {
   const dst = newDoc()
   const pagesRef = dst.alloc()
   const kids = []
-  for (const bytes of inputs) {
-    const doc = await parsePdf(bytes)
-    appendPages(doc, pageLeaves(doc).map((leaf) => ({ leaf, rotateDelta: 0 })), dst, pagesRef, kids)
+  const leavesOf = docs.map((d) => pageLeaves(d))
+  const refMaps = docs.map(() => new Map())
+  const firstNew = docs.map(() => new Map()) // per doc: src leaf key → first output ref
+  const nums = ops.map(() => dst.alloc())
+  ops.forEach((o, i) => {
+    kids.push(ref(nums[i], 0))
+    if (o.blank) return
+    const leaves = leavesOf[o.doc]
+    if (!leaves || o.page < 1 || o.page > leaves.length) throw new Error(`page ${o.page} out of range`)
+    const leaf = leaves[o.page - 1]
+    if (isRef(leaf.ref)) {
+      const key = `${leaf.ref.n} ${leaf.ref.g}`
+      if (!firstNew[o.doc].has(key)) {
+        firstNew[o.doc].set(key, ref(nums[i], 0))
+        refMaps[o.doc].set(key, ref(nums[i], 0))
+      }
+    }
+  })
+  // dropped pages: references resolve to null, never to an orphan copy
+  docs.forEach((d, di) => {
+    for (const leaf of leavesOf[di]) {
+      if (!isRef(leaf.ref)) continue
+      const key = `${leaf.ref.n} ${leaf.ref.g}`
+      if (!refMaps[di].has(key)) refMaps[di].set(key, null)
+    }
+  })
+  ops.forEach((o, i) => {
+    if (o.blank) {
+      dst.set(nums[i], new Map([
+        ['Type', name('Page')], ['Parent', ref(pagesRef, 0)],
+        ['MediaBox', [0, 0, o.blank[0] ?? 612, o.blank[1] ?? 792]],
+        ['Resources', new Map()],
+      ]))
+      return
+    }
+    writePage(docs[o.doc], leavesOf[o.doc][o.page - 1], nums[i], o.rotation || 0, dst, pagesRef, refMaps[o.doc])
+  })
+
+  // bookmarks
+  const tree = []
+  docs.forEach((d, di) => {
+    const mapped = remapOutline(readOutline(d), (key) => firstNew[di].get(key) ?? null)
+    if (names) {
+      const firstOp = ops.findIndex((o) => !o.blank && o.doc === di)
+      if (firstOp >= 0) tree.push({ title: names[di] ?? `Document ${di + 1}`, target: ref(nums[firstOp], 0), view: [name('Fit')], open: false, children: mapped })
+    } else tree.push(...mapped)
+  })
+
+  // interactive form fields whose widgets landed on output pages
+  const fields = []
+  const usedNames = new Set()
+  let formDA = null, formDR = null, needApp = false
+  docs.forEach((d, di) => {
+    const root = deref(d, get(d.trailer, 'Root'))
+    const form = deref(d, get(root, 'AcroForm'))
+    if (!(form instanceof Map)) return
+    const top = deref(d, get(form, 'Fields'))
+    if (!Array.isArray(top)) return
+    const included = new Set([...firstNew[di].keys()])
+    const onPage = (fref, depth = 0) => {
+      const f = deref(d, fref)
+      if (!(f instanceof Map) || depth > 20) return false
+      const p = get(f, 'P')
+      if (isRef(p) && included.has(`${p.n} ${p.g}`)) return true
+      const ks = deref(d, get(f, 'Kids'))
+      return Array.isArray(ks) && ks.some((k) => onPage(k, depth + 1))
+    }
+    for (const fref of top) {
+      if (!onPage(fref)) continue
+      const copied = copyValue(fref, d, dst, refMaps[di])
+      if (!copied) continue
+      const fd = dst.objects.get(copied.n)
+      const t = fd instanceof Map ? get(fd, 'T') : null
+      const tn = t?.bytes ? dec(t.bytes) : null
+      if (tn !== null) {
+        let nm = tn
+        let k = 2
+        while (usedNames.has(nm)) nm = `${tn}_${k++}`
+        usedNames.add(nm)
+        if (nm !== tn) fd.set('T', { k: 's', bytes: enc(nm) })
+      }
+      fields.push(copied)
+    }
+    formDA ??= get(form, 'DA') ?? null
+    if (!formDR && get(form, 'DR') !== undefined) formDR = copyValue(get(form, 'DR'), d, dst, refMaps[di])
+    if (get(form, 'NeedAppearances') === true) needApp = true
+  })
+
+  dst.set(pagesRef, new Map([['Type', name('Pages')], ['Kids', kids], ['Count', kids.length]]))
+  const catNum = dst.alloc()
+  const cat = new Map([['Type', name('Catalog')], ['Pages', ref(pagesRef, 0)]])
+  const ol = writeOutline(dst, tree)
+  if (ol) { cat.set('Outlines', ol); cat.set('PageMode', name('UseOutlines')) }
+  if (fields.length) {
+    const af = new Map([['Fields', fields]])
+    if (formDA) af.set('DA', formDA)
+    if (formDR) af.set('DR', formDR)
+    if (needApp) af.set('NeedAppearances', true)
+    cat.set('AcroForm', af)
   }
-  return finishDoc(dst, pagesRef, kids)
+  const trailer = new Map()
+  if (extrasFrom !== null) { // single-source rebuild: keep doc-level niceties
+    const d = docs[extrasFrom]
+    const srcRoot = deref(d, get(d.trailer, 'Root'))
+    for (const k of ['Lang', 'ViewerPreferences', 'MarkInfo', 'PageLabels']) {
+      const v = get(srcRoot, k)
+      if (v !== undefined && k !== 'PageLabels') cat.set(k, copyValue(v, d, dst, refMaps[extrasFrom]))
+    }
+    const info = get(d.trailer, 'Info')
+    if (info) { const iv = copyValue(info, d, dst, refMaps[extrasFrom]); if (iv) trailer.set('Info', iv) }
+  }
+  dst.set(catNum, cat)
+  return writeDoc(dst, catNum, trailer)
+}
+
+/** Write one source page into dst as object `num` (inherited attrs flattened). */
+function writePage(srcDoc, leaf, num, rotateDelta, dst, pagesRef, refMap, strip = []) {
+  const pageDict = new Map()
+  for (const k of INHERITED) {
+    const v = get(leaf.dict, k) ?? leaf.inh[k]
+    if (v !== undefined) pageDict.set(k, copyValue(v, srcDoc, dst, refMap))
+  }
+  for (const [k, val] of leaf.dict) {
+    if (k === 'Parent' || k === 'Metadata' || k === 'StructParents' || INHERITED.includes(k) || strip.includes(k)) continue
+    pageDict.set(k, copyValue(val, srcDoc, dst, refMap))
+  }
+  // a copied Annots array may hold nulls where an entry pointed at a dropped page
+  const an = pageDict.get('Annots')
+  if (Array.isArray(an)) pageDict.set('Annots', an.filter((x) => x !== null && x !== undefined))
+  pageDict.set('Type', name('Page'))
+  pageDict.set('Parent', ref(pagesRef, 0))
+  if (rotateDelta) {
+    const cur = get(pageDict, 'Rotate')
+    const base = typeof cur === 'number' ? cur : 0
+    pageDict.set('Rotate', ((base + rotateDelta) % 360 + 360) % 360)
+  }
+  dst.set(num, pageDict)
+}
+
+/**
+ * Merge several PDFs (Uint8Array[]) into one, in order.
+ * opts.names → one bookmark per file holding that file's own bookmarks.
+ * opts.pages → per-input array of 1-based pages to take (default: all).
+ */
+export async function mergePdfs(inputs, { names = null, pages = null } = {}) {
+  const docs = []
+  for (const b of inputs) docs.push(await parsePdf(b))
+  const ops = []
+  docs.forEach((d, di) => {
+    const n = pageLeaves(d).length
+    const sel = pages?.[di] ?? Array.from({ length: n }, (_, i) => i + 1)
+    for (const p of sel) ops.push(typeof p === 'object' ? { doc: di, ...p } : { doc: di, page: p })
+  })
+  return assemble(docs, ops, { names })
 }
 
 /**
  * Rebuild a PDF from an ordered op list (1-based source pages):
- * reorder by list order, delete by omission, rotate via `rotation` delta.
+ * reorder by list order, delete by omission, rotate via `rotation` delta,
+ * insert blank pages with {blank: [w, h]}, pull pages of extra PDFs with
+ * {doc: k, page} where k indexes [main, ...opts.extra].
  */
-export async function organizePages(bytes, ops) {
-  const src = await parsePdf(bytes)
-  const leaves = pageLeaves(src)
-  const picks = ops.map((o) => {
-    if (o.page < 1 || o.page > leaves.length) throw new Error(`page ${o.page} out of range`)
-    return { leaf: leaves[o.page - 1], rotateDelta: o.rotation || 0 }
-  })
-  const dst = newDoc()
-  const pagesRef = dst.alloc()
-  const kids = []
-  appendPages(src, picks, dst, pagesRef, kids)
-  return finishDoc(dst, pagesRef, kids)
+export async function organizePages(bytes, ops, { extra = [] } = {}) {
+  const docs = [await parsePdf(bytes)]
+  for (const b of extra) docs.push(await parsePdf(b))
+  return assemble(docs, ops.map((o) => (o.blank ? o : { doc: o.doc ?? 0, page: o.page, rotation: o.rotation })), { extrasFrom: 0 })
 }
 
 /** Extract page ranges (1-based inclusive {from,to}) into a single PDF. */
@@ -356,383 +508,47 @@ export function imagesToPdf(images, opts = {}) {
 // ---------- page numbers ----------
 
 /** Escape a JS string into PDF literal-string bytes (ASCII only). */
-const pdfStr = (s) => '(' + s.replace(/[\\()]/g, (c) => '\\' + c) + ')'
+const KEEP_ANNOTS = new Set(['Link', 'Widget'])
+const PERSONAL_ANNOT_KEYS = ['T', 'M', 'NM', 'CreationDate', 'RC', 'Subj']
 
 /**
- * Stamp a label on every page.
- * opts: pos 'tl'|'tc'|'tr'|'bl'|'bc'|'br' (default 'bc'),
- *       fmt 'n'|'n-of-total'|'page-n' (default 'n-of-total'),
- *       start (number shown on first stamped page, default 1),
- *       skipFirst (don't stamp page 1), size (pt, default 10), margin (pt, default 18),
- *       fmt 'custom' uses fmtStr with {n} = page number, {t} = total.
- * Appends a content stream ON TOP of existing content and injects a
- * Helvetica base-14 font under an unlikely-colliding resource name.
+ * Privacy scrub: drops /Info, XMP /Metadata (catalog + pages), doc IDs and
+ * /PieceInfo app data; anonymises what's left of annotations. Bookmarks,
+ * links and form fields survive — they're content, not tracking data.
+ * opts.removeComments (default true): also drop comment/markup annotations
+ * (sticky notes, highlights, ink, stamps…) which carry author names + text.
  */
-/** Display→user position map + counter-rotation matrix for /Rotate'd pages. */
-function stampPos(rot, xd, yd, w, hh) {
-  return rot === 90 ? [w - yd, xd, [0, 1, -1, 0]]
-    : rot === 180 ? [w - xd, hh - yd, [-1, 0, 0, -1]]
-    : rot === 270 ? [yd, hh - xd, [0, -1, 1, 0]]
-    : [xd, yd, [1, 0, 0, 1]]
-}
-
-const HELVETICA = new Map([
-  ['Type', name('Font')], ['Subtype', name('Type1')], ['BaseFont', name('Helvetica')],
-])
-
-/**
- * Rebuild `bytes` stamping a generated content stream on each page.
- * stampFor(ctx) → {content: string, res?: {Font?, ExtGState?}} | null.
- * ctx = {leaf, i, total, mb, rot, w, hh, dw, dh} — dw/dh are display-space dims.
- */
-async function stampPages(bytes, stampFor) {
+export async function scrubPdf(bytes, { removeComments = true } = {}) {
   const src = await parsePdf(bytes)
   const leaves = pageLeaves(src)
+  // filter + anonymise annotations IN THE SOURCE before copying: anything
+  // copied and dropped afterwards would still be written as an orphan object
+  // (and its comment text would survive in the file)
+  for (const leaf of leaves) {
+    const an = deref(src, get(leaf.dict, 'Annots'))
+    if (!Array.isArray(an)) continue
+    const keep = []
+    for (const r of an) {
+      const ad = deref(src, r)
+      if (!(ad instanceof Map)) continue
+      const sub = get(ad, 'Subtype')?.v
+      if (removeComments && !KEEP_ANNOTS.has(sub)) continue
+      // on widgets /T is the FIELD NAME, not an author — keep it
+      for (const k of PERSONAL_ANNOT_KEYS) if (!(sub === 'Widget' && (k === 'T' || k === 'RC'))) ad.delete(k)
+      ad.delete('Popup')
+      keep.push(r)
+    }
+    if (keep.length) leaf.dict.set('Annots', keep)
+    else leaf.dict.delete('Annots')
+  }
   const dst = newDoc()
   const pagesRef = dst.alloc()
   const kids = []
   const refMap = new Map()
-
-  // pre-register every leaf ref so forward page refs remap to real copies
-  const nums = leaves.map((leaf) => {
-    const num = dst.alloc()
-    kids.push(ref(num, 0))
-    if (isRef(leaf.ref)) refMap.set(`${leaf.ref.n} ${leaf.ref.g}`, ref(num, 0))
-    return num
-  })
-
-  for (let i = 0; i < leaves.length; i++) {
-    const leaf = leaves[i]
-    const num = nums[i]
-    const pageDict = new Map()
-    for (const k of INHERITED) {
-      const v = get(leaf.dict, k) ?? leaf.inh[k]
-      if (v !== undefined) pageDict.set(k, copyValue(v, src, dst, refMap))
-    }
-    for (const [k, val] of leaf.dict) {
-      if (k === 'Parent' || k === 'Metadata' || INHERITED.includes(k)) continue
-      pageDict.set(k, copyValue(val, src, dst, refMap))
-    }
-    pageDict.set('Type', name('Page'))
-    pageDict.set('Parent', ref(pagesRef, 0))
-
-    const mbSrc = get(leaf.dict, 'MediaBox') ?? leaf.inh.MediaBox
-    const mbResolved = isRef(mbSrc) ? deref(src, mbSrc) : mbSrc
-    const mb = Array.isArray(mbResolved) ? mbResolved : [0, 0, 612, 792]
-    const rotSrc = get(leaf.dict, 'Rotate') ?? leaf.inh.Rotate ?? 0
-    const rot = typeof rotSrc === 'number' ? ((rotSrc % 360) + 360) % 360 : 0
-    const w = mb[2] - mb[0]
-    const hh = mb[3] - mb[1]
-    const dw = rot % 180 === 0 ? w : hh
-    const dh = rot % 180 === 0 ? hh : w
-
-    const stamp = stampFor({ leaf, i, total: leaves.length, mb, rot, w, hh, dw, dh, dst })
-    if (stamp) {
-      const csNum = dst.alloc()
-      dst.set(csNum, stream(new Map(), new TextEncoder().encode(stamp.content)))
-      let contents = pageDict.get('Contents')
-      if (isRef(contents)) { // qpdf-style: Contents is a ref TO an array of stream refs
-        const c = dst.objects.get(contents.n)
-        if (Array.isArray(c)) contents = c
-      }
-      const arr = Array.isArray(contents) ? contents.slice() : contents !== undefined ? [contents] : []
-      arr.push(ref(csNum, 0))
-      pageDict.set('Contents', arr.length === 1 ? arr[0] : arr)
-
-      let res = pageDict.get('Resources')
-      if (isRef(res)) res = dst.objects.get(res.n)
-      // clone before mutating: an inherited/shared Resources dict is one copied
-      // Map reachable from every page — in-place adds would leak across pages
-      res = res instanceof Map ? new Map(res) : new Map()
-      for (const [section, entries] of Object.entries(stamp.res ?? {})) {
-        let sec = res.get(section)
-        if (isRef(sec)) sec = dst.objects.get(sec.n)
-        sec = sec instanceof Map ? new Map(sec) : new Map()
-        for (const [nm, val] of Object.entries(entries)) if (!sec.has(nm)) sec.set(nm, val)
-        res.set(section, sec)
-      }
-      pageDict.set('Resources', res)
-    }
-    dst.set(num, pageDict)
-  }
-  return finishDoc(dst, pagesRef, kids, src, refMap)
-}
-
-export async function addPageNumbers(bytes, opts = {}) {
-  const { pos = 'bc', fmt = 'n-of-total', fmtStr = '{n}', start = 1, skipFirst = false, size = 10, margin = 18 } = opts
-  const labelFor = (i, total) => {
-    const n = i + start
-    if (fmt === 'custom') return (fmtStr || '{n}').replaceAll('{n}', String(n)).replaceAll('{t}', String(total))
-    if (fmt === 'n') return String(n)
-    if (fmt === 'page-n') return `Page ${n}`
-    return `${n} / ${total}`
-  }
-  return stampPages(bytes, ({ i, total, mb, rot, dw, dh }) => {
-    if (i === 0 && skipFirst) return null
-    const label = labelFor(i, total)
-    const charW = size * 0.5
-    const xd = pos.endsWith('l') ? margin
-      : pos.endsWith('r') ? dw - margin - label.length * charW
-      : dw / 2 - (label.length * charW) / 2
-    const yd = pos.startsWith('t') ? dh - margin - size * 0.72 : margin
-    const w = mb[2] - mb[0], hh = mb[3] - mb[1]
-    const [xu, yu, m] = stampPos(rot, xd, yd, w, hh)
-    return {
-      content:
-        `q ${m[0]} ${m[1]} ${m[2]} ${m[3]} ${(mb[0] + xu).toFixed(1)} ${(mb[1] + yu).toFixed(1)} cm ` +
-        `BT /PDFFnt1 ${size} Tf 0 g 0 0 Td ${pdfStr(label)} Tj ET Q`,
-      res: { Font: { PDFFnt1: HELVETICA } },
-    }
-  })
-}
-
-/**
- * Stamp rotated, translucent, colored text across every page.
- * angle: degrees in DISPLAY space (negative → ↗ bottom-left→top-right).
- */
-export async function watermarkPdf(
-  bytes,
-  { text = 'CONFIDENTIAL', size = 48, opacity = 0.25, color = [0.62, 0.1, 0.1], angle = -45 } = {},
-) {
-  const th = (angle * Math.PI) / 180
-  const R = [Math.cos(th), Math.sin(th), -Math.sin(th), Math.cos(th)]
-  return stampPages(bytes, ({ mb, rot, dw, dh }) => {
-    const dispLin = rot === 90 ? [0, 1, 1, 0]
-      : rot === 180 ? [-1, 0, 0, 1]
-      : rot === 270 ? [0, -1, -1, 0]
-      : [1, 0, 0, -1]
-    const m = matMul(dispLin, R)
-    const w = mb[2] - mb[0], hh = mb[3] - mb[1]
-    const [xu, yu] = stampPos(rot, dw / 2, dh / 2, w, hh)
-    const half = (text.length * size * 0.5) / 2
-    return {
-      content:
-        `q /GSwm gs ${color.map((c) => c.toFixed(3)).join(' ')} rg ` +
-        `${m.map((v) => +v.toFixed(4)).join(' ')} ${(mb[0] + xu).toFixed(1)} ${(mb[1] + yu).toFixed(1)} cm ` +
-        `BT /PDFFnt1 ${size} Tf ${(-half).toFixed(1)} ${(-size * 0.36).toFixed(1)} Td ${pdfStr(text)} Tj ET Q`,
-      res: {
-        Font: { PDFFnt1: HELVETICA },
-        ExtGState: { GSwm: new Map([['ca', opacity], ['CA', opacity]]) },
-      },
-    }
-  })
-}
-
-// ---------- edit annotations ----------
-
-/** Unicode → CP1252 byte for the 0x80–0x9F range (differs from latin1). */
-const ANN_CP1252 = new Map([
-  [0x20ac, 0x80], [0x201a, 0x82], [0x0192, 0x83], [0x201e, 0x84], [0x2026, 0x85],
-  [0x2020, 0x86], [0x2021, 0x87], [0x02c6, 0x88], [0x2030, 0x89], [0x0160, 0x8a],
-  [0x2039, 0x8b], [0x0152, 0x8c], [0x017d, 0x8e], [0x2018, 0x91], [0x2019, 0x92],
-  [0x201c, 0x93], [0x201d, 0x94], [0x2022, 0x95], [0x2013, 0x96], [0x2014, 0x97],
-  [0x02dc, 0x98], [0x2122, 0x99], [0x0161, 0x9a], [0x203a, 0x9b], [0x0153, 0x9c],
-  [0x017e, 0x9e], [0x0178, 0x9f],
-])
-
-/** WinAnsi literal string: CP1252 bytes, high/control bytes as \ooo, else '?'. */
-const annStr = (s) => {
-  let out = '('
-  for (const ch of s) {
-    const cp = ch.codePointAt(0)
-    const b = cp < 0x80 ? cp : cp >= 0xa0 && cp < 0x100 ? cp : ANN_CP1252.get(cp) ?? 0x3f
-    if (b === 0x28 || b === 0x29 || b === 0x5c) out += '\\' + String.fromCharCode(b)
-    else if (b >= 0x20 && b < 0x7f) out += String.fromCharCode(b)
-    else out += '\\' + b.toString(8).padStart(3, '0')
-  }
-  return out + ')'
-}
-
-const annNum = (v) => +v.toFixed(2)
-
-/** '#rrggbb' → 'r g b' (0–1 floats, 3 decimals) or null. */
-const annColor = (hex) => {
-  const m = /^#([0-9a-f]{6})$/i.exec(typeof hex === 'string' ? hex : '')
-  if (!m) return null
-  const n = parseInt(m[1], 16)
-  return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255]
-    .map((c) => c.toFixed(3)).join(' ')
-}
-
-const ANN_FONTS = {
-  helv: ['ANN_F1', 'Helvetica'],
-  helvb: ['ANN_F2', 'Helvetica-Bold'],
-  times: ['ANN_F3', 'Times-Roman'],
-  courier: ['ANN_F4', 'Courier'],
-}
-const ANN_KAPPA = 0.5523
-
-const annFontDict = (base) => new Map([
-  ['Type', name('Font')], ['Subtype', name('Type1')], ['BaseFont', name(base)],
-])
-
-/**
- * Bake UI annotations into pages as real PDF operators.
- * pagesAnnots[p] (0-based) = [{t, ...}] in DISPLAY-space pt (top-left origin,
- * y down, dims dw×dh); falsy/empty entries leave the page untouched.
- * Shapes: stroke {pts,color,width}, vstroke {pts:[x,y,w]}, highlight {pts,
- * color,width}, line {x1,y1,x2,y2,arrow?}, rect/ellipse {x,y,w,h,stroke,fill,
- * lw}, text {x,y,text,size,font} (x,y = TOP of first line; baseline = y+size,
- * leading 1.2×size),
- * image {x,y,w,h,jpeg}. Appends one content stream per touched page and merges
- * ANN_* resources (fonts, ExtGState, XObjects) into page Resources.
- */
-export async function annotatePdf(bytes, pagesAnnots) {
-  return stampPages(bytes, ({ i, mb, rot, w, hh, dh, dst }) => {
-    const anns = pagesAnnots?.[i]
-    if (!Array.isArray(anns) || !anns.length) return null
-    // display→user wrap: after this cm all coords are display space (y down)
-    const dispLin = rot === 90 ? [0, 1, 1, 0]
-      : rot === 180 ? [-1, 0, 0, 1]
-      : rot === 270 ? [0, -1, -1, 0]
-      : [1, 0, 0, -1]
-    const [xu0, yu0] = stampPos(rot, 0, dh, w, hh)
-    const wrap = `${dispLin.join(' ')} ${annNum(mb[0] + xu0)} ${annNum(mb[1] + yu0)} cm`
-    const res = {}
-    const ops = []
-    let gsN = 0, imN = 0
-    const gsFor = (alpha, multiply) => {
-      const d = new Map([['ca', alpha], ['CA', alpha]])
-      if (multiply) d.set('BM', name('Multiply'))
-      const nm = `ANN_GS${++gsN}`
-      ;(res.ExtGState ??= {})[nm] = d
-      return `/${nm} gs`
-    }
-    const pt2 = (p) => Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1])
-    const num = (v) => Number.isFinite(v) ? annNum(v) : '0'
-    for (const a of anns) {
-      if (!a || typeof a !== 'object') continue
-      const alpha = typeof a.alpha === 'number' ? Math.min(1, Math.max(0, a.alpha)) : null
-      const needsGs = a.t === 'highlight' || (alpha !== null && alpha < 1)
-      const gs = needsGs ? gsFor(alpha ?? 0.35, a.t === 'highlight') : ''
-      const color = annColor(a.color)
-      const parts = []
-      switch (a.t) {
-        case 'stroke':
-        case 'highlight': {
-          if (!color || !Array.isArray(a.pts) || a.pts.length < 1 || !a.pts.every(pt2)) break
-          const w0 = a.t === 'highlight' ? (a.width ?? 12) : (a.width ?? 2)
-          const path = a.pts.length === 1
-            ? `${num(a.pts[0][0])} ${num(a.pts[0][1])} m ${num(a.pts[0][0] + 0.01)} ${num(a.pts[0][1])} l` // tap-dot
-            : a.pts.map((p, k) => `${num(p[0])} ${num(p[1])} ${k ? 'l' : 'm'}`).join(' ')
-          parts.push(`${color} RG ${num(w0)} w 1 J 1 j ${path} S`)
-          break
-        }
-        case 'vstroke': {
-          if (!color || !Array.isArray(a.pts) || a.pts.length < 1) break
-          const segs = []
-          for (let k = 0; k + 1 < a.pts.length; k++) {
-            const [p, q] = [a.pts[k], a.pts[k + 1]]
-            if (!pt2(p) || !pt2(q)) continue
-            const sw = Math.min(60, Math.max(0.3, typeof p[2] === 'number' ? p[2] : 1))
-            segs.push(`${num(sw)} w ${num(p[0])} ${num(p[1])} m ${num(q[0])} ${num(q[1])} l S`)
-          }
-          if (!segs.length && a.pts.length === 1 && pt2(a.pts[0])) { // tap-dot
-            const p = a.pts[0]
-            const sw = Math.min(60, Math.max(0.3, typeof p[2] === 'number' ? p[2] : 1))
-            segs.push(`${num(sw)} w ${num(p[0])} ${num(p[1])} m ${num(p[0] + 0.01)} ${num(p[1])} l S`)
-          }
-          if (!segs.length) break
-          parts.push(`${color} RG 1 J 1 j ${segs.join(' ')}`)
-          break
-        }
-        case 'line': {
-          if (!color || ![a.x1, a.y1, a.x2, a.y2].every(Number.isFinite)) break
-          const lw = typeof a.width === 'number' && a.width > 0 ? a.width : 2
-          parts.push(`${color} RG ${num(lw)} w ${num(a.x1)} ${num(a.y1)} m ${num(a.x2)} ${num(a.y2)} l S`)
-          if (a.arrow) {
-            const ang = Math.atan2(a.y2 - a.y1, a.x2 - a.x1)
-            const L = Math.min(60, 3 * lw)
-            const [bx, by] = [a.x2 - L * Math.cos(ang), a.y2 - L * Math.sin(ang)]
-            const [px, py] = [-Math.sin(ang) * L * 0.45, Math.cos(ang) * L * 0.45]
-            parts.push(
-              `${color} rg ${num(a.x2)} ${num(a.y2)} m ${num(bx + px)} ${num(by + py)} l ` +
-              `${num(bx - px)} ${num(by - py)} l h f`,
-            )
-          }
-          break
-        }
-        case 'rect':
-        case 'ellipse': {
-          if (![a.x, a.y, a.w, a.h].every(Number.isFinite)) break
-          const fill = annColor(a.fill), strokeC = annColor(a.stroke)
-          if (!fill && !strokeC) break
-          const lw = typeof a.lw === 'number' && a.lw > 0 ? a.lw : 1
-          let path
-          if (a.t === 'rect') {
-            path = `${num(a.x)} ${num(a.y)} ${num(a.w)} ${num(a.h)} re`
-          } else {
-            const [cx, cy, rx, ry, k] = [a.x + a.w / 2, a.y + a.h / 2, a.w / 2, a.h / 2, ANN_KAPPA]
-            path =
-              `${num(cx + rx)} ${num(cy)} m ` +
-              `${num(cx + rx)} ${num(cy - k * ry)} ${num(cx + k * rx)} ${num(cy - ry)} ${num(cx)} ${num(cy - ry)} c ` +
-              `${num(cx - k * rx)} ${num(cy - ry)} ${num(cx - rx)} ${num(cy - k * ry)} ${num(cx - rx)} ${num(cy)} c ` +
-              `${num(cx - rx)} ${num(cy + k * ry)} ${num(cx - k * rx)} ${num(cy + ry)} ${num(cx)} ${num(cy + ry)} c ` +
-              `${num(cx + k * rx)} ${num(cy + ry)} ${num(cx + rx)} ${num(cy + k * ry)} ${num(cx + rx)} ${num(cy)} c h`
-          }
-          const paint = fill && strokeC ? 'B' : fill ? 'f' : 'S'
-          parts.push(
-            `${fill ? `${fill} rg ` : ''}${strokeC ? `${strokeC} RG ` : ''}${num(lw)} w ${path} ${paint}`,
-          )
-          break
-        }
-        case 'text': {
-          const size = typeof a.size === 'number' && a.size > 0 ? a.size : null
-          const [fname, base] = ANN_FONTS[a.font] ?? ANN_FONTS.helv
-          if (!color || !size || typeof a.text !== 'string' || !a.text.length ||
-              ![a.x, a.y].every(Number.isFinite)) break
-          ;(res.Font ??= {})[fname] = annFontDict(base)
-          const lines = a.text.split('\n')
-          lines.forEach((line, li) => {
-            const yTd = a.y + size + li * size * 1.2 // baseline = top + one em
-            const [xu, yu, m] = stampPos(rot, a.x, dh - yTd, w, hh)
-            ops.push(
-              `q ${gs} ${m.join(' ')} ${annNum(mb[0] + xu)} ${annNum(mb[1] + yu)} cm ` +
-              `${color} rg BT /${fname} ${num(size)} Tf 0 0 Td ${annStr(line)} Tj ET Q`,
-            )
-          })
-          break
-        }
-        case 'image': {
-          if (!(a.jpeg instanceof Uint8Array) || ![a.x, a.y, a.w, a.h].every(Number.isFinite)) break
-          let info
-          try { info = jpegInfo(a.jpeg) } catch { break } // non-JPEG → skip
-          const imNum = dst.alloc()
-          dst.set(imNum, stream(new Map([
-            ['Type', name('XObject')], ['Subtype', name('Image')],
-            ['Width', info.width], ['Height', info.height],
-            ['ColorSpace', name(info.colorSpace)], ['BitsPerComponent', 8],
-            ['Filter', name('DCTDecode')],
-          ]), a.jpeg))
-          const nm = `ANN_Im${++imN}`
-          ;(res.XObject ??= {})[nm] = ref(imNum, 0)
-          parts.push(`${num(a.w)} 0 0 ${num(-a.h)} ${num(a.x)} ${num(a.y + a.h)} cm /${nm} Do`)
-          break
-        }
-      }
-      if (parts.length) ops.push(`q ${wrap} ${[gs, ...parts].filter(Boolean).join(' ')} Q`)
-    }
-    // leading \n keeps our first op from merging with the previous stream's
-    // last token (Contents arrays concatenate without a separator)
-    return ops.length ? { content: '\n' + ops.join('\n'), res } : null
-  })
-}
-
-/**
- * Rebuild dropping /Info, XMP /Metadata, doc IDs, per-page annotations (author
- * names, comments, popup threads) and /PieceInfo — tracker scrub.
- */
-export async function scrubPdf(bytes) {
-  const src = await parsePdf(bytes)
-  const leaves = pageLeaves(src)
-  const dst = newDoc()
-  const pagesRef = dst.alloc()
-  const kids = []
-  appendPages(src, leaves.map((leaf) => ({ leaf, rotateDelta: 0 })), dst, pagesRef, kids, [
-    'Annots',
-    'PieceInfo',
-  ])
-  return finishDoc(dst, pagesRef, kids)
+  appendPages(src, leaves.map((leaf) => ({ leaf, rotateDelta: 0 })), dst, pagesRef, kids, ['PieceInfo', 'LastModified'], refMap)
+  const { catNum, trailer } = buildCatalog(dst, pagesRef, kids, src, refMap, { skip: ['Metadata'], noInfo: true })
+  trailer.delete('ID')
+  return writeDoc(dst, catNum, trailer)
 }
 
 // ---------- text extraction ----------

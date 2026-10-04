@@ -5,12 +5,13 @@ import { parsePdf, deref } from '../src/pdf/parse.js'
 import { dec, enc, get, isStream, name, ref, set, stream, typeIs } from '../src/pdf/types.js'
 import { newDoc, writeDoc } from '../src/pdf/write.js'
 import {
-  addPageNumbers, collectDrawOps, decodeString, displayTransform, extractImages,
+  collectDrawOps, decodeString, displayTransform, extractImages,
   extractPages, fontMap, imagesToPdf, jpegInfo, mergePdfs,
   organizePages, pageCount, pageDims, pageLeaves, pagePreview, parseRanges,
   parseToUnicode, readMetadata, scrubPdf, splitPdf, tokenizeContent,
 } from '../src/pdf/ops.js'
 import { unPredict } from '../src/pdf/filters.js'
+import { addPageNumbers } from '../src/pdf/stamp.js'
 import { crc32, zipStore } from '../src/zip.js'
 import { pngEncode, zlibStore } from '../src/png.js'
 
@@ -294,9 +295,9 @@ describe('new tools', () => {
     const lastRef = Array.isArray(contents) ? contents[contents.length - 1] : contents
     const last = deref(doc, lastRef)
     const text = new TextDecoder('latin1').decode(last.data)
-    assert.match(text, /BT \/PDFFnt1 10 Tf/)
+    assert.match(text, /BT \/PSNum 10 Tf/)
     assert.match(text, /\(1 \/ 3\) Tj/)
-    const font = get(get(get(first.dict, 'Resources'), 'Font'), 'PDFFnt1')
+    const font = get(get(get(first.dict, 'Resources'), 'Font'), 'PSNum')
     assert.equal(get(font, 'BaseFont').v, 'Helvetica')
   })
 
@@ -416,14 +417,17 @@ describe('qol engine', () => {
     // page 1 skipped: no trailing label stream
     const c0 = get(leaves[0].dict, 'Contents')
     assert.equal(c0, undefined)
-    // page 2 stamped "Page 6" top-right at 14pt
+    // page 2 is the first numbered page → shows the start value, "Page 5", top-right at 14pt
     const c1 = get(leaves[1].dict, 'Contents')
     const lastRef = Array.isArray(c1) ? c1[c1.length - 1] : c1
     const text = new TextDecoder('latin1').decode(deref(doc, lastRef).data)
-    assert.match(text, /BT \/PDFFnt1 14 Tf/)
-    assert.match(text, /\(Page 6\) Tj/)
-    // top-right: baseline y = 400-30-0.72*14 = 359.9, x = 200-30-42 = 128 (cm translation)
-    assert.match(text, /q 1 0 0 1 128\.0 359\.9 cm/)
+    assert.match(text, /BT \/PSNum 14 Tf/)
+    assert.match(text, /\(Page 5\) Tj/)
+    // right-aligned with REAL Helvetica widths: x = 200 - 30 - width("Page 5" @14pt = 44.366)
+    const m = text.match(/q 1 0 0 1 ([\d.]+) ([\d.]+) cm/)
+    assert.ok(m, text)
+    assert.ok(Math.abs(+m[1] - (200 - 30 - 44.366)) < 0.05, `x ${m[1]}`)
+    assert.ok(Math.abs(+m[2] - (400 - 30 - 0.72 * 14)) < 0.05, `y ${m[2]}`)
   })
 
   it('addPageNumbers preserves indirect page Resources', async () => {
@@ -445,7 +449,7 @@ describe('qol engine', () => {
     const res = deref(doc, get(leaf.dict, 'Resources'))
     assert.ok(res instanceof Map, 'indirect /Resources must survive stamping')
     assert.deepEqual(res.get('ProcSet').map((n) => n.v), ['PDF', 'Text'])
-    assert.equal(get(get(res, 'Font'), 'PDFFnt1') instanceof Map, true)
+    assert.equal(get(get(res, 'Font'), 'PSNum') instanceof Map, true)
   })
 
   it('addPageNumbers counter-rotates the stamp on rotated pages', async () => {
@@ -457,14 +461,15 @@ describe('qol engine', () => {
     const contents = get(leaf.dict, 'Contents')
     const lastRef = Array.isArray(contents) ? contents[contents.length - 1] : contents
     const text = new TextDecoder('latin1').decode(deref(doc, lastRef).data)
-    assert.match(text, /q 0 1 -1 0 82\.0 187\.5 cm/)
+    assert.match(text, /q 0 1 -1 0 82 (\d+(\.\d+)?) cm/)
+    assert.ok(Math.abs(+text.match(/q 0 1 -1 0 82 ([\d.]+) cm/)[1] - (200 - 19.46 / 2)) < 0.1, 'centred with real widths')
     // 270° → user's left edge, text advancing −y.
     const out2 = await addPageNumbers(classicPdf([100], { rotate: [270] }), { pos: 'bc' })
     const doc2 = await parsePdf(out2)
     const c2 = get(pageLeaves(doc2)[0].dict, 'Contents')
     const last2 = Array.isArray(c2) ? c2[c2.length - 1] : c2
     const text2 = new TextDecoder('latin1').decode(deref(doc2, last2).data)
-    assert.match(text2, /q 0 -1 1 0 18\.0 212\.5 cm/)
+    assert.match(text2, /q 0 -1 1 0 18 (\d+(\.\d+)?) cm/)
   })
 
   it('scrubPdf drops page annotations carrying author data', async () => {

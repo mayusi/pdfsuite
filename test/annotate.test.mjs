@@ -3,9 +3,10 @@ import assert from 'node:assert/strict'
 import { parsePdf, deref } from '../src/pdf/parse.js'
 import { dec, enc, get, isStream, name, ref, stream } from '../src/pdf/types.js'
 import {
-  annotatePdf, collectDrawOps, contentBytes, pageLeaves, streamData,
+  collectDrawOps, contentBytes, pageLeaves, streamData,
   tokenizeContent,
 } from '../src/pdf/ops.js'
+import { annotatePdf } from '../src/pdf/stamp.js'
 
 // ---------- fixtures ----------
 
@@ -117,13 +118,16 @@ describe('annotatePdf', () => {
       const s = deref(doc, c)
       assert.equal(dec(s.data), ORIG_CONTENT)
     }
-    // annotated page: array with original stream first + appended stream last
+    // annotated page: [q, original, Q, stamp] — the original is isolated in its own
+    // q…Q so leftover graphics state can never move the stamp
     const streams = contentStreams(doc, leaves[1])
-    assert.equal(streams.length, 2)
-    assert.equal(dec(streams[0].data), ORIG_CONTENT)
-    const text = dec(streams[1].data)
+    assert.equal(streams.length, 4)
+    assert.equal(dec(streams[0].data).trim(), 'q')
+    assert.equal(dec(streams[1].data), ORIG_CONTENT)
+    assert.equal(dec(streams[2].data).trim(), 'Q')
+    const text = dec(streams[3].data)
     assert.match(text, /10 10 m 50 60 l S/)
-    assert.match(text, /1\.000 0\.000 0\.000 RG 2 w 1 J 1 j/)
+    assert.match(text, /1 0 0 RG 2 w 1 J 1 j/)
   })
 
   it('appends one stream per annotated page and merges resources', async () => {
@@ -138,8 +142,9 @@ describe('annotatePdf', () => {
     // original F1 survives alongside ANN_* additions
     assert.equal(get(get(res, 'Font'), 'F1') instanceof Map || get(get(res, 'Font'), 'F1')?.k, true)
     const fonts = get(res, 'Font')
-    assert.equal(get(fonts, 'ANN_F2') instanceof Map, true)
-    assert.equal(get(get(fonts, 'ANN_F2'), 'BaseFont').v, 'Helvetica-Bold')
+    assert.equal(get(fonts, 'ANN_HelveticaBold') instanceof Map, true)
+    assert.equal(get(get(fonts, 'ANN_HelveticaBold'), 'BaseFont').v, 'Helvetica-Bold')
+    assert.equal(get(get(fonts, 'ANN_HelveticaBold'), 'Encoding').v, 'WinAnsiEncoding')
     const gsMap = get(res, 'ExtGState')
     assert.ok(gsMap instanceof Map && gsMap.size >= 1, 'ExtGState merged')
     const gs0 = [...gsMap.values()][0]
@@ -153,7 +158,7 @@ describe('annotatePdf', () => {
     const text = dec((await contentBytes(doc, leaf)))
     assert.match(text, /5 6 30 20 re B/)
     assert.match(text, /\/ANN_GS1 gs/)
-    assert.match(text, /BT \/ANN_F2 12 Tf 0 0 Td \(Hi\) Tj ET/)
+    assert.match(text, /BT \/ANN_HelveticaBold 12 Tf 1 0 0 -1 20 39\.6 Tm \(Hi\) Tj ET/)
     assert.match(text, /24 0 0 -16 40 66 cm \/ANN_Im1 Do/)
   })
 
@@ -169,14 +174,14 @@ describe('annotatePdf', () => {
     const leaf = pageLeaves(doc)[0]
     const data = await contentBytes(doc, leaf)
     const text = dec(data)
-    // variable width: per-segment linewidths, clamped 0.3–60
+    // variable width: per-segment mean of its two end widths, clamped 0.3–60
     assert.match(text, /60 w 10 10 m 20 10 l S/)
-    assert.match(text, /0\.3 w 20 10 m 30 10 l S/)
+    assert.match(text, /4\.05 w 20 10 m 30 10 l S/)
     // highlight → Multiply ExtGState + default alpha .35
     const res = deref(doc, get(leaf.dict, 'Resources'))
     const bm = [...get(res, 'ExtGState').values()].find((d) => get(d, 'BM')?.v === 'Multiply')
     assert.ok(bm, 'highlight ExtGState carries /BM /Multiply')
-    assert.match(text, /1 J 1 j 0 50 m 100 50 l S/)
+    assert.match(text, /0 J 1 j 0 50 m 100 50 l S/) // flat caps: highlighter look
     // arrow → filled triangle at tip
     assert.match(text, /60 0 m .* l .* l h f/)
     // ellipse → cubic segs
@@ -185,7 +190,7 @@ describe('annotatePdf', () => {
     const qs = ops.filter((o) => o.op === 'q').length
     const Qs = ops.filter((o) => o.op === 'Q').length
     assert.equal(qs, Qs)
-    assert.equal(qs, 5, `each annotation wrapped: ${qs} q-ops`)
+    assert.equal(qs, 6, `each annotation wrapped + original isolated: ${qs} q-ops`)
   })
 
   it('writes WinAnsi text: octal escapes, never raw UTF-8', async () => {
@@ -202,11 +207,11 @@ describe('annotatePdf', () => {
     assert.match(text, /line2 \?/)
     assert.ok(![...data].some((b) => b >= 0x80), 'no raw high bytes in content')
     // two \n-separated lines → two independent BT…Tj blocks, ANN_F3 (Times)
-    assert.equal((text.match(/BT \/ANN_F3 10 Tf/g) ?? []).length, 2)
+    assert.equal((text.match(/BT \/ANN_TimesRoman 10 Tf/g) ?? []).length, 2)
     assert.equal((text.match(/Tj ET/g) ?? []).length, 2)
     const res = deref(doc, get(leaf.dict, 'Resources'))
-    assert.equal(get(get(res, 'Font'), 'ANN_F3') instanceof Map, true)
-    assert.equal(get(get(get(res, 'Font'), 'ANN_F3'), 'BaseFont').v, 'Times-Roman')
+    assert.equal(get(get(res, 'Font'), 'ANN_TimesRoman') instanceof Map, true)
+    assert.equal(get(get(get(res, 'Font'), 'ANN_TimesRoman'), 'BaseFont').v, 'Times-Roman')
   })
 
   it('counter-rotates annotations on /Rotate 90 pages', async () => {
@@ -221,8 +226,8 @@ describe('annotatePdf', () => {
     // display-space wrap for rot 90: dispLin [0 1 1 0] + origin at mb origin
     assert.match(text, /q 0 1 1 0 0 0 cm/)
     assert.match(text, /10 10 m 20 30 l S/)
-    // text keeps upright counter-rotation matrix like addPageNumbers
-    assert.match(text, /q  0 1 -1 0 .* cm|q \/ANN_GS\d+ 0 1 -1 0 .* cm|q 0 1 -1 0 .* cm/)
+    // text is set inside the display-space wrap with a y-flipped text matrix
+    assert.match(text, /1 0 0 -1 30 48 Tm \(R\) Tj/)
     // and the round-trip: collectDrawOps lands the stroke at display (10,10)
     const { ops, box } = await collectDrawOps(doc, leaf)
     assert.deepEqual(box, { w: 400, h: 100 })
@@ -232,7 +237,7 @@ describe('annotatePdf', () => {
       `display coords ${JSON.stringify(path.segs[0])}`)
     const t = ops.find((o) => o.t === 'text' && o.str === 'R')
     assert.ok(t, 'annotated text renders in display space')
-    assert.ok(Math.abs(t.x - 30) < 0.5 && Math.abs(t.y - 50) < 0.5, `text pos ${JSON.stringify(t)}`)
+    assert.ok(Math.abs(t.x - 30) < 0.5 && Math.abs(t.y - 48) < 0.5, `text pos ${JSON.stringify(t)}`)
   })
 
   it('skips invalid annotations silently', async () => {
@@ -247,8 +252,9 @@ describe('annotatePdf', () => {
     const doc = await parsePdf(out)
     const leaves = pageLeaves(doc)
     const streams = contentStreams(doc, leaves[0])
-    assert.equal(streams.length, 2, 'one valid annotation → one appended stream')
-    const text = dec(streams[1].data)
+    assert.equal(streams.length, 4, 'one valid annotation → q/orig/Q + one appended stream')
+    const text = dec(streams[3].data)
+    assert.equal((text.match(/ q /g) ?? []).length + (text.startsWith('\nq ') ? 1 : 0), 1, 'exactly one annotation emitted')
     assert.match(text, /7 7 m 8 8 l S/)
     // page 2: empty array → untouched
     const c2 = get(leaves[1].dict, 'Contents')
@@ -270,7 +276,7 @@ describe('annotatePdf', () => {
       Math.abs(r.w - 30) < 0.5 && Math.abs(r.h - 20) < 0.5, `rect ${JSON.stringify(r)}`)
     const t = ops.find((o) => o.t === 'text' && o.str === 'Box')
     assert.ok(t)
-    assert.ok(Math.abs(t.x - 100) < 0.5 && Math.abs(t.y - 132) < 0.5, `text ${JSON.stringify(t)}`)
+    assert.ok(Math.abs(t.x - 100) < 0.5 && Math.abs(t.y - 129.6) < 0.5, `text baseline = top + 0.8em ${JSON.stringify(t)}`)
     const im = ops.find((o) => o.t === 'img')
     assert.ok(im)
     assert.ok(Math.abs(im.x - 40) < 0.5 && Math.abs(im.y - 50) < 0.5 &&
