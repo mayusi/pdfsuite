@@ -2,9 +2,13 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>PDFSuite — free PDF tools, no uploads</title>
+    <meta name="description" content="Edit, sign, merge, split, compress, redact and convert PDFs for free — right in your browser. Files never leave your device. No account, no limits, works offline." />
+    <meta name="theme-color" content="#0e9f6e" />
     <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="Merge, split, organize and convert PDFs — free, open source, zero dependencies, 100% client-side. Your files never leave your browser." />
+    <link rel="apple-touch-icon" href="./icon-192.png" />
+    <link rel="manifest" href="./manifest.webmanifest" />
     <style>
 /* PDFSuite design system — light + dark themes, one accent, calm surfaces.
    Theme: follows the OS unless the user picked one ([data-theme] on <html>). */
@@ -618,10 +622,10 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .pv-cap { font-size: 12px; color: var(--text-3); }
 @media (max-width: 560px) { .pv-page { width: 100%; } }
 </style>
-    <title>PDFSuite — free PDF tools, no uploads, zero deps</title>
   </head>
   <body>
     <div id="app"></div>
+    <noscript><p style="font: 16px system-ui; padding: 24px">PDFSuite runs entirely in your browser, so it needs JavaScript turned on.</p></noscript>
     <script>
 
 // ---- src/pdf/types.js ----
@@ -6257,6 +6261,16 @@ function rafThrottle(fn) {
   }
 }
 
+/**
+ * Let the browser paint between chunks of heavy work. Uses scheduler.yield or
+ * a MessageChannel hop — setTimeout gets throttled to ≥1s in background tabs,
+ * which would stall a long job the moment the user switches tabs.
+ */
+function yieldUI() {
+  if (globalThis.scheduler?.yield) return globalThis.scheduler.yield()
+  return new Promise((r) => { const ch = new MessageChannel(); ch.port1.onmessage = () => r(); ch.port2.postMessage(0) })
+}
+
 // ---- src/ui/kit.js ----
 // UI kit — buttons, inputs, dialogs, toasts, drop zones, sortable lists and
 // lazy page thumbnails. Plain DOM; every component returns an element.
@@ -10217,7 +10231,7 @@ function ExtractImgs() {
         const rec = { name: `${stem(info.name)}-image-${++n}${im.ext}`, data, mime: im.mime, w, h: hh, hash, count: 1, url: im.mime === 'image/jp2' ? null : URL.createObjectURL(new Blob([data], { type: im.mime })) }
         byHash.set(hash, rec)
         images.push(rec)
-        if (n % 4 === 0) await new Promise((r) => setTimeout(r))
+        if (n % 4 === 0) await yieldUI()
       }
       sel = new Set(visible())
       loading = null
@@ -10516,7 +10530,7 @@ function PdfToImg() {
       if (!blob) throw new Error(`Couldn’t encode page ${i + 1} (too large?)`)
       files.push({ name: `${base}-page-${String(i + 1).padStart(String(info.leaves.length).length, '0')}.${fmt}`, data: new Uint8Array(await blob.arrayBuffer()) })
       progress.set((k + 1) / picks.length)
-      await new Promise((r) => setTimeout(r)) // let the UI breathe between pages
+      await yieldUI() // let the UI breathe between pages
     }
     progress = null
     if (files.length === 1) result = { blob: new Blob([files[0].data], { type: mime }), name: files[0].name, n: 1 }
@@ -10598,7 +10612,7 @@ function PdfToText() {
       for (let k = 0; k < info.leaves.length; k++) {
         pages.push(await pageText(info.doc, info.leaves[k]).catch(() => ''))
         loading.set((k + 1) / info.leaves.length)
-        if (k % 5 === 4) await new Promise((r) => setTimeout(r))
+        if (k % 5 === 4) await yieldUI()
       }
       loading = null
       paint()

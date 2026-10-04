@@ -1,4 +1,4 @@
-import { h, stem, saveBlob, plural } from '../ui/dom.js'
+import { h, stem, saveBlob, plural, yieldUI } from '../ui/dom.js'
 import { Button, Dropzone, Switch, FileChip, Progress, pickFiles, toast, Callout } from '../ui/kit.js'
 import { ToolHead, Workspace, openPdf, takeHandoff, mount, docMeta } from '../ui/tool.js'
 import { pageText } from '../pdf/content.js'
@@ -30,7 +30,7 @@ export function PdfToText() {
       for (let k = 0; k < info.leaves.length; k++) {
         pages.push(await pageText(info.doc, info.leaves[k]).catch(() => ''))
         loading.set((k + 1) / info.leaves.length)
-        if (k % 5 === 4) await new Promise((r) => setTimeout(r))
+        if (k % 5 === 4) await yieldUI()
       }
       loading = null
       paint()

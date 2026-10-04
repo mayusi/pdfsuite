@@ -177,3 +177,13 @@ export function rafThrottle(fn) {
     id = requestAnimationFrame(() => { id = 0; fn(...args) })
   }
 }
+
+/**
+ * Let the browser paint between chunks of heavy work. Uses scheduler.yield or
+ * a MessageChannel hop — setTimeout gets throttled to ≥1s in background tabs,
+ * which would stall a long job the moment the user switches tabs.
+ */
+export function yieldUI() {
+  if (globalThis.scheduler?.yield) return globalThis.scheduler.yield()
+  return new Promise((r) => { const ch = new MessageChannel(); ch.port1.onmessage = () => r(); ch.port2.postMessage(0) })
+}

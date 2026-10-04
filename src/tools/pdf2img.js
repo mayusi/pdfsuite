@@ -1,4 +1,4 @@
-import { h, plural, stem, fmtBytes } from '../ui/dom.js'
+import { h, plural, stem, fmtBytes, yieldUI } from '../ui/dom.js'
 import { Button, Dropzone, Field, Seg, Range, FileChip, Progress, pickFiles, toast } from '../ui/kit.js'
 import { ToolHead, Workspace, ResultCard, openPdf, runTask, takeHandoff, mount, docMeta } from '../ui/tool.js'
 import { PageCard, pageThumbs, zoomPage } from '../ui/pages.js'
@@ -55,7 +55,7 @@ export function PdfToImg() {
       if (!blob) throw new Error(`Couldn’t encode page ${i + 1} (too large?)`)
       files.push({ name: `${base}-page-${String(i + 1).padStart(String(info.leaves.length).length, '0')}.${fmt}`, data: new Uint8Array(await blob.arrayBuffer()) })
       progress.set((k + 1) / picks.length)
-      await new Promise((r) => setTimeout(r)) // let the UI breathe between pages
+      await yieldUI() // let the UI breathe between pages
     }
     progress = null
     if (files.length === 1) result = { blob: new Blob([files[0].data], { type: mime }), name: files[0].name, n: 1 }

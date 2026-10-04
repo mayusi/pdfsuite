@@ -1,4 +1,4 @@
-import { h, icon, plural, stem, saveBlob, fmtBytes } from '../ui/dom.js'
+import { h, icon, plural, stem, saveBlob, fmtBytes, yieldUI } from '../ui/dom.js'
 import { Button, Dropzone, Switch, FileChip, Progress, pickFiles, toast, Callout } from '../ui/kit.js'
 import { ToolHead, Workspace, openPdf, takeHandoff, mount, docMeta } from '../ui/tool.js'
 import { decodeImageStream } from '../pdf/ops.js'
@@ -52,7 +52,7 @@ export function ExtractImgs() {
         const rec = { name: `${stem(info.name)}-image-${++n}${im.ext}`, data, mime: im.mime, w, h: hh, hash, count: 1, url: im.mime === 'image/jp2' ? null : URL.createObjectURL(new Blob([data], { type: im.mime })) }
         byHash.set(hash, rec)
         images.push(rec)
-        if (n % 4 === 0) await new Promise((r) => setTimeout(r))
+        if (n % 4 === 0) await yieldUI()
       }
       sel = new Set(visible())
       loading = null

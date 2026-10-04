@@ -3,10 +3,13 @@
 //   2. pdfsuite.html — the ENTIRE app inlined into one file. Double-click it and
 //      it runs with no server, no network, no modules — works over file://.
 import { cpSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { deflateSync } from 'node:zlib'
+import { crc32 } from './src/zip.js'
 
 rmSync('dist', { recursive: true, force: true })
 mkdirSync('dist', { recursive: true })
-for (const p of ['index.html', 'styles.css', 'favicon.svg', 'src']) cpSync(p, `dist/${p}`, { recursive: true })
+
 
 // --- single-file bundle -----------------------------------------------------
 // Dependency order matters: everything is concatenated into ONE <script>, so
@@ -92,3 +95,101 @@ writeFileSync('dist/pdfsuite.html', html)
 // footer link (./pdfsuite.html) resolves on the live site.
 writeFileSync('pdfsuite.html', html)
 console.log('dist/ + pdfsuite.html ready — static site + single-file app (works offline from double-click)')
+
+// --- PWA: icons, manifest, service worker ---------------------------------
+// Icons are drawn here (no image tools needed): accent rounded square + page.
+function drawIcon(size, { maskable = false } = {}) {
+  const px = new Uint8Array(size * size * 4)
+  const SS = 4 // supersampling for smooth edges
+  const inside = (x, y) => {
+    const u = x / size, v = y / size
+    // background: rounded square (maskable icons fill the whole tile)
+    const r = maskable ? 0 : 0.234, pad = 0
+    const bx = Math.max(Math.abs(u - 0.5) - (0.5 - pad - r), 0), by = Math.max(Math.abs(v - 0.5) - (0.5 - pad - r), 0)
+    const bg = maskable || Math.hypot(bx, by) <= r
+    if (!bg) return 0
+    // page: rect with folded corner, scaled down for maskable safe zone
+    const k = maskable ? 0.72 : 1
+    const pu = (u - 0.5) / k + 0.5, pv = (v - 0.5) / k + 0.5
+    const inPage = pu >= 0.297 && pu <= 0.719 && pv >= 0.203 && pv <= 0.813 && !(pu > 0.563 && pv < 0.359 && pu - 0.563 > pv - 0.203)
+    if (!inPage) return 1
+    const lines = [0.5, 0.594, 0.688]
+    for (const [i, ly] of lines.entries()) {
+      const x1 = i === 2 ? 0.53 : 0.61
+      if (Math.abs(pv - ly) < 0.024 && pu > 0.39 && pu < x1) return 1
+    }
+    return 2
+  }
+  const colors = [[0, 0, 0, 0], [14, 159, 110, 255], [255, 255, 255, 255]]
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const acc = [0, 0, 0, 0]
+      for (let sy = 0; sy < SS; sy++) for (let sx = 0; sx < SS; sx++) {
+        const c = colors[inside(x + (sx + 0.5) / SS, y + (sy + 0.5) / SS)]
+        for (let k = 0; k < 4; k++) acc[k] += c[k] * (k === 3 ? 1 : c[3] / 255)
+      }
+      const o = (y * size + x) * 4
+      const a = acc[3] / (SS * SS)
+      for (let k = 0; k < 3; k++) px[o + k] = a ? Math.round(acc[k] / (SS * SS) / (a / 255)) : 0
+      px[o + 3] = Math.round(a)
+    }
+  }
+  return pngDeflated(size, size, px)
+}
+
+/** RGBA → PNG with real zlib compression (build-time only; the browser encoder stays dependency-free). */
+function pngDeflated(w, h, rgba) {
+  const raw = Buffer.alloc((w * 4 + 1) * h)
+  for (let y = 0; y < h; y++) Buffer.from(rgba.buffer, y * w * 4, w * 4).copy(raw, y * (w * 4 + 1) + 1)
+  const chunk = (type, data) => {
+    const len = Buffer.alloc(4); len.writeUInt32BE(data.length)
+    const body = Buffer.concat([Buffer.from(type), data])
+    const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(body) >>> 0)
+    return Buffer.concat([len, body, crc])
+  }
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4); ihdr[8] = 8; ihdr[9] = 6
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), chunk('IDAT', deflateSync(raw, { level: 9 })), chunk('IEND', Buffer.alloc(0))])
+}
+const icons = { 'icon-192.png': drawIcon(192), 'icon-512.png': drawIcon(512), 'icon-maskable-512.png': drawIcon(512, { maskable: true }) }
+const manifest = {
+  name: 'PDFSuite — free PDF tools', short_name: 'PDFSuite',
+  description: 'Edit, sign, merge, split, compress and convert PDFs — privately, in your browser.',
+  start_url: './', scope: './', display: 'standalone', background_color: '#0c0d10', theme_color: '#0e9f6e',
+  icons: [
+    { src: 'icon-192.png', sizes: '192x192', type: 'image/png' },
+    { src: 'icon-512.png', sizes: '512x512', type: 'image/png' },
+    { src: 'icon-maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+    { src: 'favicon.svg', sizes: 'any', type: 'image/svg+xml' },
+  ],
+}
+for (const [name, data] of Object.entries(icons)) writeFileSync(name, data)
+writeFileSync('manifest.webmanifest', JSON.stringify(manifest, null, 2))
+
+// service worker: cache-first app shell, versioned by a hash of every file it serves
+const SHELL = ['./', 'index.html', 'styles.css', 'favicon.svg', 'manifest.webmanifest', 'pdfsuite.html', ...Object.keys(icons), ...MODULES]
+const hash = createHash('sha256')
+for (const f of SHELL) if (f !== './') hash.update(readFileSync(f))
+const version = hash.digest('hex').slice(0, 12)
+const sw = `// Generated by build.mjs — offline support. Version changes whenever any file does.
+const CACHE = 'pdfsuite-${version}'
+const SHELL = ${JSON.stringify(SHELL)}
+self.addEventListener('install', (e) => {
+  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()))
+})
+self.addEventListener('activate', (e) => {
+  e.waitUntil(caches.keys().then((ks) => Promise.all(ks.filter((k) => k.startsWith('pdfsuite-') && k !== CACHE).map((k) => caches.delete(k)))).then(() => self.clients.claim()))
+})
+self.addEventListener('fetch', (e) => {
+  const req = e.request
+  if (req.method !== 'GET' || new URL(req.url).origin !== location.origin) return
+  e.respondWith(caches.match(req, { ignoreSearch: true }).then((hit) => hit || fetch(req).then((res) => {
+    if (res.ok && res.type === 'basic') { const copy = res.clone(); caches.open(CACHE).then((c) => c.put(req, copy)) }
+    return res
+  }).catch(() => caches.match('index.html'))))
+})
+`
+writeFileSync('sw.js', sw)
+
+// static site for Pages / any host
+for (const p of ['index.html', 'styles.css', 'favicon.svg', 'src', 'sw.js', 'manifest.webmanifest', 'pdfsuite.html', ...Object.keys(icons)]) cpSync(p, `dist/${p}`, { recursive: true })
+console.log(`PWA: sw.js (cache ${version}), manifest, ${Object.keys(icons).length} icons`)
