@@ -92,7 +92,7 @@ function home() {
     }
   }
   const search = h('input', {
-    class: 'input', type: 'search', placeholder: 'Search tools — try “sign”, “combine”, “smaller”…', 'aria-label': 'Search tools',
+    class: 'input', type: 'search', placeholder: 'Search tools — try “sign” or “smaller”', 'aria-label': 'Search tools',
     oninput: (e) => { q = e.target.value; paint() },
     onkeydown: (e) => {
       if (e.key === 'Enter') { const first = results.querySelector('.toolcard'); if (first) location.hash = first.getAttribute('href') }

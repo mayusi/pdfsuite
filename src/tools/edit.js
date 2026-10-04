@@ -140,7 +140,7 @@ export function Edit(params = {}) {
         els.name),
       h('div', { class: 'ed-mid' },
         els.undo, els.redo, h('span', { class: 'ed-sep' }),
-        h('div', { class: 'ed-zoom' },
+        h('div', { class: 'ed-zoom ed-hide-m' },
           h('button', { type: 'button', 'data-tip': 'Zoom out', 'aria-label': 'Zoom out', onclick: () => ed.setZoom(ed.zoom / 1.2, { commit: true }) }, icon('minus', 'icon-sm')),
           els.zoomLbl,
           h('button', { type: 'button', 'data-tip': 'Zoom in', 'aria-label': 'Zoom in', onclick: () => ed.setZoom(ed.zoom * 1.2, { commit: true }) }, icon('plus', 'icon-sm'))),

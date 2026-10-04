@@ -609,3 +609,6 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .pv-page .pskel { width: 100%; background: var(--surface-3); border-radius: 3px; animation: pulse 1.4s ease-in-out infinite; }
 .pv-cap { font-size: 12px; color: var(--text-3); }
 @media (max-width: 560px) { .pv-page { width: 100%; } }
+
+/* grid items default to min-width:auto = a canvas's intrinsic pixel width; never let a thumbnail widen its track */
+.pgrid > *, .pcard, .pcard .pthumbw, .pcard .pthumbw > *, .igrid > *, .tgrid > *, .flist > *, .ws-main > *, .ws-side > * { min-width: 0; }
