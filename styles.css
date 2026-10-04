@@ -612,3 +612,15 @@ button, input, select, textarea { font: inherit; color: inherit; }
 
 /* grid items default to min-width:auto = a canvas's intrinsic pixel width; never let a thumbnail widen its track */
 .pgrid > *, .pcard, .pcard .pthumbw, .pcard .pthumbw > *, .igrid > *, .tgrid > *, .flist > *, .ws-main > *, .ws-side > * { min-width: 0; }
+
+/* editor panels sit in fixed columns: a hidden thumbnails panel must leave its
+   (0px) column empty instead of shifting the page area into it */
+.ed-rail { grid-column: 1; }
+.ed-thumbs { grid-column: 2; }
+.ed-scroll { grid-column: 3; grid-row: 1; }
+.ed-props { grid-column: 4; grid-row: 1; }
+.ed-rail, .ed-thumbs { grid-row: 1; }
+@media (max-width: 760px) {
+  .ed-scroll { grid-column: 1; }
+  .ed-rail, .ed-thumbs, .ed-props { grid-column: auto; grid-row: auto; }
+}

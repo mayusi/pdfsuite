@@ -98,6 +98,7 @@ export function Edit(params = {}) {
     thumbs?.disconnect()
     io?.disconnect()
     farIo?.disconnect()
+    els.ro?.disconnect()
     ed.views = []
     els = {}
     els.name = h('input', {
@@ -183,7 +184,18 @@ export function Edit(params = {}) {
       clearTimeout(ed._zt)
       ed._zt = setTimeout(() => ed.setZoom(ed.zoom, { commit: true }), 160)
     }, { passive: false })
-    requestAnimationFrame(() => { ed.fit('width', { max: 1.5 }); ed.setTool(ed.tool) })
+    // fit as soon as the page area has a real size (it can be 0 for a frame
+    // while the layout settles) and keep fitting on resize until the user zooms
+    ed.userZoomed = false
+    const ro = new ResizeObserver(() => {
+      if (!els.scroll.clientWidth) return
+      if (!ed.userZoomed) ed.fit('width', { max: 1.5, auto: true })
+    })
+    ro.observe(els.scroll)
+    els.ro = ro
+    ed.setTool(ed.tool)
+    // insurance: the first pages render even if visibility notifications are late
+    setTimeout(() => { for (const v of ed.views.slice(0, 2)) if (!v.rendered) v.render() }, 500)
   }
 
   function rebuildViews() {
@@ -566,7 +578,8 @@ export function Edit(params = {}) {
   }
 
   // ---------- zoom ----------
-  ed.setZoom = (z, { cx, cy, live = false, commit = false } = {}) => {
+  ed.setZoom = (z, { cx, cy, live = false, commit = false, auto = false } = {}) => {
+    if (!auto) ed.userZoomed = true
     const nz = Math.max(0.2, Math.min(5, z))
     const sc = els.scroll
     const r = sc.getBoundingClientRect()
@@ -584,13 +597,14 @@ export function Edit(params = {}) {
       ed._rz = setTimeout(() => { for (const v of ed.views) if (v.near) v.render() }, 40)
     }
   }
-  ed.fit = (mode, { max = 5 } = {}) => {
+  ed.fit = (mode, { max = 5, auto = false } = {}) => {
     const sc = els.scroll
     if (!sc.clientWidth) return
+    if (!auto) ed.userZoomed = true
     const maxW = Math.max(...ed.pages.map((p) => p.w))
     const cur = ed.current ?? ed.pages[0]
     const z = mode === 'page' ? Math.min((sc.clientWidth - 48) / cur.w, (sc.clientHeight - 60) / cur.h) : (sc.clientWidth - 48) / maxW
-    ed.setZoom(Math.min(max, z), { commit: true })
+    ed.setZoom(Math.min(max, z), { commit: true, auto })
     if (mode === 'page') ed.scrollToPage(cur)
   }
 
@@ -737,6 +751,7 @@ export function Edit(params = {}) {
     io?.disconnect()
     farIo?.disconnect()
     thumbs?.disconnect()
+    els.ro?.disconnect()
   }
   // the router swaps the whole app on navigation: notice when we're detached
   const mo = new MutationObserver(() => { if (!root.isConnected) { cleanup(); mo.disconnect() } })
