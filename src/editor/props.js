@@ -560,6 +560,7 @@ function pageActions(ed) {
       Button({ label: 'Rotate', icon: 'rotate', size: 'sm', onClick: () => ed.rotatePage(p) }),
       Button({ label: 'Duplicate', icon: 'copy', size: 'sm', onClick: () => ed.duplicatePage(p) }),
       Button({ label: 'Blank after', icon: 'pageAdd', size: 'sm', onClick: () => ed.insertBlank(p) }),
+      Button({ label: 'Design & Edit', icon: 'brush', size: 'sm', tip: 'Open this page in the photo & design editor', onClick: () => ed.openInStudio(p) }),
       Button({ label: 'Delete', icon: 'trash', size: 'sm', variant: 'danger', disabled: ed.pages.length < 2, onClick: () => ed.deletePage(p) })))
 }
 

@@ -2,7 +2,7 @@
 // page scroll, contextual properties, undo/redo, forms, signatures, redaction.
 import { h, icon, setKids, saveBlob, fmtBytes, stem, rafThrottle, yieldUI } from '../ui/dom.js'
 import { Button, Dropzone, TextInput, Field, Seg, Range, Switch, toast, modal, menu, confirmDialog, pickFiles, sortable, thumbQueue } from '../ui/kit.js'
-import { openPdf, takeHandoff, friendly } from '../ui/tool.js'
+import { openPdf, takeHandoff, handoff, friendly } from '../ui/tool.js'
 import { rotatedCanvas } from '../ui/pages.js'
 import { renderPage, imageSource } from '../pdf/render.js'
 import { readFields } from '../pdf/forms.js'
@@ -138,6 +138,7 @@ export function Edit(params = {}) {
         { label: 'Save pages as PNG images', icon: 'image', onClick: () => doExport({ format: 'png', pages: 'all', dpi: 150 }) },
         ed.fields.length ? { label: 'Download with flattened form', icon: 'form', onClick: () => doExport({ flatten: true }) } : null,
         'sep',
+        { label: 'Open this page in Design & Edit', icon: 'brush', onClick: () => ed.openInStudio(ed.current) },
         { label: 'Open another PDF', icon: 'files', onClick: async () => { if (await confirmLeave()) { const [f] = await pickFiles(); if (f) load([f]) } } },
         { label: 'Keyboard shortcuts', icon: 'keyboard', kbd: '?', onClick: () => ed.showShortcuts() },
       ], { align: 'right' }),
@@ -1060,6 +1061,18 @@ export function Edit(params = {}) {
         },
       }],
     })
+  }
+  /** Send one page (with its edits) to Design & Edit as an image design. */
+  ed.openInStudio = async (p = ed.current) => {
+    ed.closeEditor(true)
+    if (ed.dirty && !(await confirmDialog('Open this page in Design & Edit?', 'The page goes over with your edits. Edits on the other pages aren’t kept unless you download first.', { ok: 'Open page', cancel: 'Stay here' }))) return
+    try {
+      const out = await exportEdited(ed.info, [p], { forms: Object.keys(ed.values).length ? { values: ed.values, flatten: true } : null })
+      const file = new File([out], `${ed.fileName || stem(ed.info.name)}.pdf`, { type: 'application/pdf' })
+      ed.dirty = false
+      handoff({ studioPdf: file, page: 0, dpi: 150 })
+      location.hash = '#/studio'
+    } catch (e) { toast(`Couldn’t open the page: ${friendly(e)}`, { type: 'error' }) }
   }
   ed._export = doExport // test hook
 

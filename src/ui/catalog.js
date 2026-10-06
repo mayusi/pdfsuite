@@ -10,6 +10,7 @@ export const CATS = [
 
 export const CATALOG = [
   { id: 'edit', cat: 'edit', name: 'Edit PDF', icon: 'pencil', desc: 'Change existing text, add text, images, shapes and drawings', kw: 'annotate write draw text modify change typo' },
+  { id: 'studio', cat: 'edit', name: 'Design & Edit', icon: 'brush', desc: 'Photo editor and designer: layers, brushes, selections, filters, text, templates — open photos or PDF pages', kw: 'photo image editor pixlr photoshop design canva layers brush filter retouch background remove poster thumbnail template', isNew: true },
   { id: 'sign', cat: 'edit', name: 'Sign PDF', icon: 'signature', desc: 'Draw, type or upload your signature and place it', kw: 'signature esign autograph initials', route: 'edit?mode=sign' },
   { id: 'fill', cat: 'edit', name: 'Fill forms', icon: 'form', desc: 'Type into PDF form fields, tick boxes, flatten', kw: 'acroform fields fillable', route: 'edit?mode=fill' },
   { id: 'redact', cat: 'edit', name: 'Redact', icon: 'redact', desc: 'Permanently remove sensitive text and images', kw: 'blackout censor hide remove privacy', route: 'edit?mode=redact', isNew: true },
@@ -43,6 +44,7 @@ export const NEXT = {
   rotate: ['compress', 'edit'],
   crop: ['compress', 'edit'],
   edit: ['compress', 'protect', 'merge'],
+  studio: ['img2pdf', 'compress'],
   watermark: ['protect', 'compress'],
   pagenum: ['protect', 'compress'],
   img2pdf: ['compress', 'edit', 'merge'],

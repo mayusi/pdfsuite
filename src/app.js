@@ -17,9 +17,10 @@ import { Compress } from './tools/compress.js'
 import { Watermark } from './tools/watermark.js'
 import { Protect, Unlock } from './tools/protect.js'
 import { Edit } from './tools/edit.js'
+import { Studio } from './tools/studio.js'
 
 const VIEWS = {
-  edit: Edit, merge: Merge, split: Split, organize: Organize, rotate: Rotate, crop: Crop, img2pdf: ImgToPdf,
+  edit: Edit, studio: Studio, merge: Merge, split: Split, organize: Organize, rotate: Rotate, crop: Crop, img2pdf: ImgToPdf,
   extract: ExtractImgs, pagenum: PageNums, metadata: Metadata, pdf2img: PdfToImg, pdftext: PdfToText,
   compress: Compress, watermark: Watermark, protect: Protect, unlock: Unlock,
 }
@@ -136,8 +137,8 @@ function render() {
   cleanup = null
   const { id, params } = route()
   const view = VIEWS[id]
-  if (id === 'edit') {
-    // the editor is a full-screen workspace: no site chrome
+  if (id === 'edit' || id === 'studio') {
+    // the editors are full-screen workspaces: no site chrome
     setKids(app, view(params))
   } else if (view) {
     setKids(app, h('div', { class: 'shell' }, topbar(), h('main', { class: 'content' }, view(params)), footer()))
@@ -155,7 +156,7 @@ function render() {
 // dropped PDF opens a "what do you want to do?" picker.
 addEventListener('dragover', (e) => e.preventDefault())
 addEventListener('drop', (e) => {
-  if (e.target.closest?.('.dz')) return
+  if (e.target.closest?.('.dz, .st-stage')) return
   e.preventDefault()
   const files = [...(e.dataTransfer?.files ?? [])]
   if (!files.length) return
