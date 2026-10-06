@@ -429,7 +429,11 @@ export function createPageView(ed, page) {
     if (changed) {
       page.annots = next
       if (drag) drag.changed = true
-      if (ed.sel && !page.annots.includes(ed.sel.a)) ed.select(null)
+      if (ed.sel?.page === page) {
+        const alive = [...ed.selSet].filter((a) => page.annots.includes(a))
+        if (!alive.includes(ed.sel.a) || !alive.length) ed.select(null)
+        else if (alive.length !== ed.selSet.size) ed.selectMany(page, alive)
+      }
     }
     v.redraw()
   }
