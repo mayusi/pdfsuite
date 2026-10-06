@@ -19,6 +19,7 @@ export const CATALOG = [
   { id: 'merge', cat: 'organize', name: 'Merge PDF', icon: 'merge', desc: 'Combine PDFs into one, in the order you want', kw: 'combine join append concatenate' },
   { id: 'split', cat: 'organize', name: 'Split PDF', icon: 'scissors', desc: 'Extract pages or split into several files', kw: 'extract separate pages ranges' },
   { id: 'organize', cat: 'organize', name: 'Organize pages', icon: 'grid', desc: 'Reorder, rotate, delete, duplicate and insert pages', kw: 'reorder sort move delete insert blank arrange' },
+  { id: 'crop', cat: 'organize', name: 'Crop PDF', icon: 'crop', desc: 'Trim margins or cut pages down to the part you need', kw: 'trim margins cut resize page size whitespace', isNew: true },
   { id: 'rotate', cat: 'organize', name: 'Rotate PDF', icon: 'rotate', desc: 'Turn all or some pages the right way up', kw: 'turn orientation landscape portrait' },
 
   { id: 'img2pdf', cat: 'convert', name: 'Images to PDF', icon: 'image', desc: 'JPG, PNG, WebP or GIF images into one PDF', kw: 'jpg jpeg png photo scan convert' },
@@ -40,6 +41,7 @@ export const NEXT = {
   split: ['merge', 'compress'],
   organize: ['compress', 'pagenum', 'edit'],
   rotate: ['compress', 'edit'],
+  crop: ['compress', 'edit'],
   edit: ['compress', 'protect', 'merge'],
   watermark: ['protect', 'compress'],
   pagenum: ['protect', 'compress'],

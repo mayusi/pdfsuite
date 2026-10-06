@@ -11,6 +11,14 @@ import { decodeImage } from './image.js'
 import { pageLeaves } from './ops.js'
 
 const inRect = (x, y, r) => x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h
+/** Image bbox [x0,y0,x1,y1] ≈ region {x,y,w,h}: intersection-over-union ≥ 0.8. */
+export function sameBox(b, r) {
+  const ix = Math.max(0, Math.min(b[2], r.x + r.w) - Math.max(b[0], r.x))
+  const iy = Math.max(0, Math.min(b[3], r.y + r.h) - Math.max(b[1], r.y))
+  const inter = ix * iy
+  const uni = (b[2] - b[0]) * (b[3] - b[1]) + r.w * r.h - inter
+  return uni > 0 && inter / uni >= 0.8
+}
 const rectsHit = (b, r) => b[0] < r.x + r.w && b[2] > r.x && b[1] < r.y + r.h && b[3] > r.y
 
 /** Serialize a PDF string operand (literal, escaped). */
@@ -135,7 +143,7 @@ export async function applyRemovals(doc, regionsByPage, { mode = 'redact', fill 
     // ---- collect glyph removals per (xpath, op, part) ----
     const perStream = new Map() // xpathKey → Map<opIdx, Map<part, info>>
     for (const o of ops) {
-      if (o.t !== 'text' || !o.glyphs?.length) continue
+      if (mode === 'dropimg' || o.t !== 'text' || !o.glyphs?.length) continue
       let rec = null
       o.glyphs.forEach((g, gi) => {
         const [cx, cy] = matPt(o.m, g.x + g.w / 2, o.fs * 0.32)
@@ -154,6 +162,16 @@ export async function applyRemovals(doc, regionsByPage, { mode = 'redact', fill 
     }
     // ---- images (redact mode) ----
     const imageEdits = [] // {xpath, op, newName, stream} | {xpath, op, inline: replacement text}
+    if (mode === 'dropimg') { // remove whole images that match a region (editor: "edit this image")
+      for (const o of ops) {
+        if (o.t !== 'img' || !o.src) continue
+        if (!regions.some((r) => sameBox(o.bbox, r))) continue
+        const key = o.src.xpath.join('/')
+        imageEdits.push({ key, xpath: o.src.xpath, op: o.src.op, drop: true })
+        stats.images++
+      }
+      for (const e of imageEdits) if (!perStream.has(e.key)) perStream.set(e.key, { xpath: e.xpath, ops: new Map() })
+    }
     if (mode === 'redact') {
       let n = 0
       for (const o of ops) {

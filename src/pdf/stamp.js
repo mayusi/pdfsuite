@@ -307,6 +307,13 @@ export async function watermarkPdf(bytes, opts = {}) {
 
 const KAPPA = 0.5523
 
+/** CSS / canvas blend mode → PDF /BM name. */
+export const BLEND_PDF = {
+  multiply: 'Multiply', screen: 'Screen', overlay: 'Overlay', darken: 'Darken', lighten: 'Lighten',
+  'color-dodge': 'ColorDodge', 'color-burn': 'ColorBurn', 'hard-light': 'HardLight', 'soft-light': 'SoftLight',
+  difference: 'Difference', exclusion: 'Exclusion', hue: 'Hue', saturation: 'Saturation', color: 'Color', luminosity: 'Luminosity',
+}
+
 /** SVG-ish path segs (display space) → PDF path operators. */
 function pathOps(segs) {
   return segs.map((s) => {
@@ -348,9 +355,9 @@ export async function annotatePdf(bytes, pagesAnnots) {
     const ops = []
     const annots = []
     let gsN = 0, imN = 0
-    const gsFor = (alpha, multiply) => {
+    const gsFor = (alpha, blend) => {
       const d = new Map([['ca', alpha], ['CA', alpha]])
-      if (multiply) d.set('BM', name('Multiply'))
+      if (blend) d.set('BM', name(blend === true ? 'Multiply' : blend))
       const nm = `ANN_GS${++gsN}`
       ;(res.ExtGState ??= {})[nm] = d
       return `/${nm} gs`
@@ -454,7 +461,7 @@ export async function annotatePdf(bytes, pagesAnnots) {
           if (!fill && !strokeC) break
           const lw = typeof a.lw === 'number' && a.lw > 0 ? a.lw : 1.5
           const paint = fill && strokeC ? 'B' : fill ? 'f' : 'S'
-          parts.push(`${fill ? `${fill} rg ` : ''}${strokeC ? `${strokeC} RG ` : ''}${num(lw)} w 1 J 1 j ${pathOps(a.segs)} ${paint}`)
+          parts.push(`${fill ? `${fill} rg ` : ''}${strokeC ? `${strokeC} RG ` : ''}${num(lw)} w 1 J 1 j ${dashOp} ${pathOps(a.segs)} ${paint}`)
           break
         }
         case 'text': {
@@ -464,18 +471,35 @@ export async function annotatePdf(bytes, pagesAnnots) {
           const fname = `ANN_${base.replace(/[^A-Za-z]/g, '')}`
           ;(res.Font ??= {})[fname] = fontDict(base)
           const lead = size * (a.lineHeight ?? 1.2)
+          const sp = Number.isFinite(a.spacing) ? a.spacing : 0 // letter spacing, pt (Tc)
           const lines = a.text.split('\n')
-          const widths = lines.map((l) => textWidth(base, l, size))
+          const widths = lines.map((l) => textWidth(base, l, size) + sp * Math.max(0, [...l].length - 1))
           const boxW = Number.isFinite(a.w) && a.w > 0 ? a.w : Math.max(...widths)
           if (a.bg) {
             const bg = rgbOp(a.bg)
             if (bg) parts.push(`${bg} rg ${num(a.x - 2)} ${num(a.y - 1)} ${num(boxW + 4)} ${num(lines.length * lead + 2)} re f`)
           }
+          const outline = a.outline?.width > 0 ? rgbOp(a.outline.color ?? '#000000') : null
+          const shadow = a.shadow?.opacity > 0 ? rgbOp(a.shadow.color ?? '#000000') : null
+          const runLines = (dx, dy, fill, mode) => lines.forEach((line, li) => {
+            if (!line.length) return
+            const lx = (a.align === 'center' ? a.x + (boxW - widths[li]) / 2 : a.align === 'right' ? a.x + boxW - widths[li] : a.x) + dx
+            const by = a.y + size * 0.8 + li * lead + dy // baseline (ascent ≈ 0.8em for the standard fonts)
+            // glyphs need y-up: local flip at the baseline
+            parts.push(`${fill} BT /${fname} ${num(size)} Tf ${sp ? `${num(sp)} Tc ` : ''}${mode ? `${mode} ` : ''}1 0 0 -1 ${num(lx)} ${num(by)} Tm ${winStr(line)} Tj ET`)
+          })
+          if (shadow) {
+            const sgs = gsFor((a.shadow.opacity / 100) * (alpha ?? 1), null)
+            const off = (v) => ((v ?? 0) / 100) * size * 0.5
+            parts.push(`q ${sgs}`)
+            runLines(off(a.shadow.dx ?? 30), off(a.shadow.dy ?? 30), `${shadow} rg`, '')
+            parts.push('Q')
+          }
+          if (outline) runLines(0, 0, `${color} rg ${outline} RG ${num(a.outline.width)} w 1 j`, '2 Tr')
+          else runLines(0, 0, `${color} rg`, '')
           lines.forEach((line, li) => {
             const lx = a.align === 'center' ? a.x + (boxW - widths[li]) / 2 : a.align === 'right' ? a.x + boxW - widths[li] : a.x
-            const by = a.y + size * 0.8 + li * lead // baseline (ascent ≈ 0.8em for the standard fonts)
-            // glyphs need y-up: local flip at the baseline
-            if (line.length) parts.push(`${color} rg BT /${fname} ${num(size)} Tf 1 0 0 -1 ${num(lx)} ${num(by)} Tm ${winStr(line)} Tj ET`)
+            const by = a.y + size * 0.8 + li * lead
             const deco = []
             if (a.underline) deco.push(by + size * 0.12)
             if (a.strike) deco.push(by - size * 0.28)
@@ -521,8 +545,9 @@ export async function annotatePdf(bytes, pagesAnnots) {
         }
       }
       if (parts.length) {
-        const needsGs = a.t === 'highlight' || (alpha !== null && alpha < 1)
-        const gs = needsGs ? gsFor(alpha ?? 0.35, a.t === 'highlight') : ''
+        const bm = a.t === 'highlight' ? 'Multiply' : BLEND_PDF[a.blend] ?? null
+        const needsGs = bm || (alpha !== null && alpha < 1)
+        const gs = needsGs ? gsFor(alpha ?? (a.t === 'highlight' ? 0.35 : 1), bm) : ''
         ops.push(`q ${wrap} ${[pre, gs, ...parts].filter(Boolean).join(' ')} Q`)
       }
     }
@@ -550,5 +575,29 @@ export async function setMetadata(bytes, fields) {
   doc.trailer.set('Info', info)
   const root = deref(doc, get(doc.trailer, 'Root'))
   if (root instanceof Map) root.delete('Metadata')
+  return stampPages(doc, () => null)
+}
+
+/**
+ * Set the visible area of pages. rects[i] = {x, y, w, h} in that page's
+ * current DISPLAY space (what the user sees), or null to leave it.
+ * Handles /Rotate by mapping the display rect back into user space.
+ */
+export async function cropPages(bytes, rects) {
+  const doc = await parsePdf(bytes)
+  pageLeaves(doc).forEach((leaf, i) => {
+    const r = rects[i]
+    if (!r || !(r.w > 1) || !(r.h > 1)) return
+    const box = pageBox(doc, leaf)
+    const rot = pageRotation(doc, leaf)
+    const w = box[2] - box[0], hh = box[3] - box[1]
+    const toUser = (x, y) => { const [ux, uy] = stampPos(rot, x, (rot % 180 === 0 ? hh : w) - y, w, hh); return [box[0] + ux, box[1] + uy] }
+    const [x1, y1] = toUser(r.x, r.y), [x2, y2] = toUser(r.x + r.w, r.y + r.h)
+    const cb = [Math.min(x1, x2), Math.min(y1, y2), Math.max(x1, x2), Math.max(y1, y2)].map((v) => +v.toFixed(3))
+    leaf.dict.set('CropBox', cb)
+    leaf.dict.set('TrimBox', cb)
+    leaf.dict.delete('ArtBox')
+    leaf.dict.delete('BleedBox')
+  })
   return stampPages(doc, () => null)
 }

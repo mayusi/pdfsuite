@@ -624,3 +624,84 @@ button, input, select, textarea { font: inherit; color: inherit; }
   .ed-scroll { grid-column: 1; }
   .ed-rail, .ed-thumbs, .ed-props { grid-column: auto; grid-row: auto; }
 }
+
+/* ---------- editor: panels added for image editing, layers, multi-select ---------- */
+.ed-props .ptabs { margin-top: -4px; }
+.ed-props .ptabs .seg > button { height: 30px; font-size: 12px; }
+.ed-props .fxsec { border: 1px solid var(--border); border-radius: 10px; padding: 0 10px; background: var(--surface); }
+.ed-props .fxsec > summary { cursor: pointer; list-style: none; font-size: 12px; font-weight: 650; color: var(--text-2); height: 38px; display: flex; align-items: center; justify-content: space-between; user-select: none; }
+.ed-props .fxsec > summary::-webkit-details-marker { display: none; }
+.ed-props .fxsec > summary::after { content: '+'; font-size: 16px; color: var(--text-3); font-weight: 400; }
+.ed-props .fxsec[open] > summary::after { content: '−'; }
+.ed-props .fxsec[open] { padding-bottom: 10px; display: grid; gap: 10px; }
+.ed-props .fxsec .switch { margin: 0; }
+.ed-props .grp.fxrow { grid-template-columns: 82px minmax(0, 1fr); align-items: center; gap: 8px; }
+.ed-props .grp.fxrow > label { font-weight: 500; }
+.ed-props .grp.sub { padding-left: 10px; border-left: 2px solid var(--border); }
+.ed-props .presets { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.ed-props .preset { border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); padding: 3px 3px 4px; cursor: pointer; display: grid; gap: 3px; justify-items: center; color: var(--text-2); font-size: 10.5px; font-weight: 550; min-width: 0; }
+.ed-props .preset img, .ed-props .preset .ph { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 5px; background: var(--surface-3); display: block; }
+.ed-props .preset:hover { border-color: var(--border-strong); color: var(--text); }
+.ed-props .preset.on { border-color: var(--accent); color: var(--accent); box-shadow: 0 0 0 2px var(--accent-ring); }
+.ed-props .shape-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.ed-props .shape-grid button { height: 40px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface-2); cursor: pointer; font-size: 19px; line-height: 1; color: var(--text); display: grid; place-items: center; }
+.ed-props .shape-grid button.on, .ed-props .shape-grid button:hover { border-color: var(--accent); color: var(--accent); }
+.ed-props .imgtools .btn { flex: 1 1 auto; }
+.ed-props .layers { display: grid; gap: 3px; }
+.ed-props .layer { display: flex; align-items: center; gap: 8px; min-height: 38px; padding: 0 4px 0 2px; border-radius: 8px; border: 1px solid transparent; cursor: pointer; color: var(--text-2); font-size: 13px; }
+.ed-props .layer:hover { background: var(--hover); color: var(--text); }
+.ed-props .layer.on { background: var(--accent-soft); border-color: var(--accent); color: var(--text); }
+.ed-props .layer.off .lname, .ed-props .layer.off > .icon { opacity: 0.45; }
+.ed-props .layer .lname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ed-props .layer .lname small { color: var(--text-3); }
+.ed-props .layer .input { flex: 1; min-width: 0; height: 28px; }
+.ed-props .layer .lgrip { cursor: grab; color: var(--text-3); display: grid; place-items: center; width: 22px; height: 30px; touch-action: none; }
+.ed-props .layer .btn.on { color: var(--accent); }
+.ed-props .layer.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
+.ed-props .layer.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
+.xport { display: grid; gap: 14px; }
+.xport .seg > button { white-space: nowrap; }
+
+/* touch screens: bigger targets everywhere in the editor */
+@media (pointer: coarse) {
+  .ed-tool { width: 48px; height: 48px; }
+  .ed-props .btn-sm { min-height: 38px; }
+  .ed-props .btn-sm.btn-icon { min-width: 38px; }
+  .ed-props input[type='range'] { height: 30px; }
+  .ed-props .layer { min-height: 46px; }
+  .ed-top .btn-sm { min-height: 38px; }
+  .ed-top .btn-sm.btn-icon { min-width: 38px; }
+}
+
+/* tablet (iPad portrait / small laptops): page gets the full width, the
+   properties panel becomes a slide-over drawer opened from the top bar */
+.ed-propbtn { display: none; }
+.ed-props .ed-drawer-x { display: none; }
+@media (min-width: 761px) and (max-width: 1100px) {
+  .ed-body, .ed-body.thumbs-open { grid-template-columns: 58px 0 minmax(0, 1fr) 0; }
+  .ed-body.thumbs-open { grid-template-columns: 58px 150px minmax(0, 1fr) 0; }
+  .ed-propbtn { display: inline-flex; }
+  .ed-props { position: fixed; top: 54px; right: 0; bottom: 0; width: min(320px, 46vw); z-index: 30; border-left: 1px solid var(--border); box-shadow: var(--shadow-lg); transform: translateX(105%); transition: transform 0.2s ease; }
+  .ed-props.open { transform: none; }
+  .ed-props .ed-drawer-x { display: inline-flex; }
+}
+
+/* phone: taller sheet for the image editor, room for the bottom tool bar */
+@media (max-width: 760px) {
+  .ed-props { max-height: 58vh; }
+  .ed-props .presets { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .ed-props .grp.fxrow { grid-template-columns: 74px minmax(0, 1fr); }
+  .ed-top .btn .lbl-m-hide { display: none; }
+}
+
+/* crop tool */
+.crop-nav { display: flex; align-items: center; justify-content: center; gap: 10px; font-size: 13px; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.crop-stage { position: relative; width: min(100%, 560px); margin: 0 auto; background: var(--surface-3); box-shadow: var(--page-shadow); user-select: none; overflow: hidden; }
+.crop-stage .crop-cv { width: 100%; height: auto; display: block; }
+.crop-box { position: absolute; border: 2px solid #fff; outline: 1px solid rgba(0, 0, 0, 0.5); box-shadow: 0 0 0 9999px rgba(15, 18, 25, 0.5); cursor: move; touch-action: none; }
+.crop-h { position: absolute; width: 18px; height: 18px; background: #fff; border: 1px solid rgba(0, 0, 0, 0.45); border-radius: 50%; transform: translate(-50%, -50%); touch-action: none; }
+.crop-h.nw { left: 0; top: 0; cursor: nwse-resize; } .crop-h.n { left: 50%; top: 0; cursor: ns-resize; } .crop-h.ne { left: 100%; top: 0; cursor: nesw-resize; }
+.crop-h.e { left: 100%; top: 50%; cursor: ew-resize; } .crop-h.se { left: 100%; top: 100%; cursor: nwse-resize; } .crop-h.s { left: 50%; top: 100%; cursor: ns-resize; }
+.crop-h.sw { left: 0; top: 100%; cursor: nesw-resize; } .crop-h.w { left: 0; top: 50%; cursor: ew-resize; }
+@media (pointer: coarse) { .crop-h { width: 26px; height: 26px; } }
+.crop-mm { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }

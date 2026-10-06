@@ -1,21 +1,25 @@
 // Edit PDF — full-screen workspace: tool rail, page thumbnails, continuous
 // page scroll, contextual properties, undo/redo, forms, signatures, redaction.
-import { h, icon, setKids, saveBlob, fmtBytes, stem, rafThrottle } from '../ui/dom.js'
-import { Button, Dropzone, TextInput, Field, toast, modal, menu, confirmDialog, pickFiles, sortable, thumbQueue } from '../ui/kit.js'
+import { h, icon, setKids, saveBlob, fmtBytes, stem, rafThrottle, yieldUI } from '../ui/dom.js'
+import { Button, Dropzone, TextInput, Field, Seg, Range, Switch, toast, modal, menu, confirmDialog, pickFiles, sortable, thumbQueue } from '../ui/kit.js'
 import { openPdf, takeHandoff, friendly } from '../ui/tool.js'
 import { rotatedCanvas } from '../ui/pages.js'
-import { renderPage } from '../pdf/render.js'
+import { renderPage, imageSource } from '../pdf/render.js'
 import { readFields } from '../pdf/forms.js'
 import { findText } from '../pdf/redact.js'
+import { parsePdf } from '../pdf/parse.js'
+import { pageLeaves, parseRanges } from '../pdf/ops.js'
+import { zipStore } from '../zip.js'
 import { createPageView, rotPt } from '../editor/view.js'
 import { renderProps, TOOL_INFO } from '../editor/props.js'
-import { annClone, annRotate90 } from '../editor/annots.js'
+import { annClone, annRotate90, annBounds } from '../editor/annots.js'
+import { processImage, fxIsIdentity } from '../editor/imagefx.js'
 import { exportEdited } from '../editor/export.js'
 import { signatureDialog, sigFromUrl } from '../editor/signature.js'
 
 const TOOLS = [
   ['select', 'cursor', 'V'], ['edittext', 'editText', 'E'], ['text', 'type', 'T'], '|',
-  ['draw', 'pencil', 'P'], ['highlight', 'highlight', 'H'], ['shape', 'shapes', 'R'], '|',
+  ['draw', 'pencil', 'P'], ['highlight', 'highlight', 'H'], ['erase', 'eraser', 'Z'], ['shape', 'shapes', 'R'], '|',
   ['whiteout', 'whiteout', 'W'], ['redact', 'redact', 'X'], '|',
   ['image', 'image', 'I'], ['signature', 'signature', 'S'], ['stamp', 'stamp', 'K'], ['note', 'note', 'N'], ['link', 'link', 'L'],
 ]
@@ -25,7 +29,9 @@ const DEFAULT_STYLE = {
   textColor: '#111111', textSize: 14, font: 'helv', bold: false, italic: false, underline: false, align: 'left',
   shapeStroke: '#e03131', shapeFill: null, shapeWidth: 2, shapeAlpha: 1, shapeDash: false,
   redactColor: '#000000', stampSize: 18, stampColor: '#e03131', markColor: '#111111', noteColor: '#ffd43b',
+  eraserSize: 10, snap: true, shapeFillAlpha: 1, polySides: 6, starPoints: 5,
 }
+const tabletMQ = matchMedia('(min-width: 761px) and (max-width: 1100px)')
 let uidSeq = 0
 const uid = () => `a${++uidSeq}`
 
@@ -39,8 +45,10 @@ export function Edit(params = {}) {
     info: null, doc: null, pages: [], views: [], zoom: 1, tool: 'select',
     sub: { shape: 'rect', hl: 'text', stamp: 'check' },
     style: loadStyle(), sel: null, editing: null, fields: [], values: {}, dirty: false,
-    imgCache: new Map(), bitmaps: new WeakMap(), clipboard: null, fileName: '',
+    imgCache: new Map(), clipboard: null, fileName: '', propsTab: 'props',
     history: [], future: [], current: null,
+    selSet: new Set(), penSeen: false, cropping: null, cropAspect: null, pdfImg: null,
+    touchUI: matchMedia('(pointer: coarse)').matches, newId: () => uid(),
   }
   let els = {}
   let thumbs = null
@@ -121,11 +129,13 @@ export function Edit(params = {}) {
       onkeydown: (e) => { e.stopPropagation(); if (e.key === 'Enter') { const n = parseInt(e.target.value, 10); if (n >= 1 && n <= ed.pages.length) ed.scrollToPage(ed.pages[n - 1]) } },
     })
     els.pageCount = h('span', {}, `/ ${ed.pages.length}`)
-    els.download = Button({ label: 'Download', icon: 'download', variant: 'primary', size: 'sm', onClick: () => doExport({}) })
+    els.download = Button({ label: 'Download', icon: 'download', variant: 'primary', size: 'sm', onClick: () => ed.exportDialog() })
     const more = Button({
       icon: 'chevDown', variant: 'primary', size: 'sm', tip: 'More options',
       onClick: (e) => menu(e.currentTarget, [
-        { label: 'Download PDF', icon: 'download', kbd: 'Ctrl+S', onClick: () => doExport({}) },
+        { label: 'Download options…', icon: 'download', kbd: 'Ctrl+Shift+S', onClick: () => ed.exportDialog() },
+        { label: 'Quick download PDF', icon: 'file', kbd: 'Ctrl+S', onClick: () => doExport({}) },
+        { label: 'Save pages as PNG images', icon: 'image', onClick: () => doExport({ format: 'png', pages: 'all', dpi: 150 }) },
         ed.fields.length ? { label: 'Download with flattened form', icon: 'form', onClick: () => doExport({ flatten: true }) } : null,
         'sep',
         { label: 'Open another PDF', icon: 'files', onClick: async () => { if (await confirmLeave()) { const [f] = await pickFiles(); if (f) load([f]) } } },
@@ -147,6 +157,7 @@ export function Edit(params = {}) {
           h('button', { type: 'button', 'data-tip': 'Zoom in', 'aria-label': 'Zoom in', onclick: () => ed.setZoom(ed.zoom * 1.2, { commit: true }) }, icon('plus', 'icon-sm'))),
         h('span', { class: 'ed-sep ed-hide-m' }),
         h('span', { class: 'ed-pageind ed-hide-m' }, els.pageInput, els.pageCount)),
+      h('button', { class: 'btn btn-ghost btn-icon btn-sm ed-propbtn', 'data-tip': 'Properties & layers', 'aria-label': 'Properties and layers', onclick: () => els.props.classList.toggle('open') }, icon('layers')),
       h('div', { class: 'row', style: { gap: '0', flexWrap: 'nowrap' } }, els.download, more))
 
     els.rail = h('nav', { class: 'ed-rail', 'aria-label': 'Tools' }, TOOLS.map((t) => {
@@ -195,7 +206,10 @@ export function Edit(params = {}) {
     els.ro = ro
     ed.setTool(ed.tool)
     // insurance: the first pages render even if visibility notifications are late
-    setTimeout(() => { for (const v of ed.views.slice(0, 2)) if (!v.rendered) v.render() }, 500)
+    setTimeout(() => {
+      if (!ed.userZoomed && els.scroll?.clientWidth) ed.fit('width', { max: 1.5, auto: true }) // resize notifications can be paused
+      for (const v of ed.views.slice(0, 2)) if (!v.rendered) v.render()
+    }, 500)
   }
 
   function rebuildViews() {
@@ -273,11 +287,12 @@ export function Edit(params = {}) {
 
   ed.setTool = (t) => {
     ed.closeEditor(true)
+    ed.finishCrop(true)
     if (t === 'image') { ed.insertImage(); return }
     ed.tool = t
     els.rail?.querySelectorAll('.ed-tool').forEach((b) => b.classList.toggle('on', b.dataset.tool === t))
     for (const v of ed.views) {
-      v.over.style.cursor = t === 'select' ? 'default' : t === 'edittext' || t === 'text' ? 'text' : 'crosshair'
+      v.over.style.cursor = t === 'select' ? 'default' : t === 'edittext' || t === 'text' ? 'text' : t === 'erase' ? 'none' : 'crosshair'
       v.over.style.touchAction = t === 'select' ? 'pan-x pan-y' : 'none'
       if ((t === 'edittext' || t === 'redact' || t === 'highlight') && v.near) v.getRuns().then(() => v.redraw())
     }
@@ -291,6 +306,7 @@ export function Edit(params = {}) {
       highlight: ed.sub.hl === 'text' ? 'Drag across text to highlight it' : 'Draw to highlight',
       redact: 'Drag boxes over sensitive content — or search on the right', stamp: 'Click to place the mark',
       note: 'Click to add a comment', link: 'Drag over the area to make clickable', signature: 'Create or pick a signature on the right',
+      erase: 'Rub over drawings, highlights and shapes to erase them',
     }
     if (tips[ed.tool]) ed.hint(tips[ed.tool])
   }
@@ -309,8 +325,18 @@ export function Edit(params = {}) {
     hintT = setTimeout(() => hintEl?.remove(), 2800)
   }
 
+  // selection: ed.sel = primary {page, a}; ed.selSet = every selected object (same page)
+  const clearPdfImg = () => {
+    if (!ed.pdfImg) return
+    const p = ed.pdfImg.page
+    ed.pdfImg = null
+    ed.viewOf(p)?.redraw()
+  }
   ed.select = (page, a) => {
+    if (ed.cropping && ed.cropping.a !== a) ed.finishCrop(true)
+    clearPdfImg()
     if (!page) {
+      ed.selSet.clear()
       if (!ed.sel) return
       const old = ed.sel
       ed.sel = null
@@ -320,9 +346,41 @@ export function Edit(params = {}) {
     }
     const prev = ed.sel
     ed.sel = { page, a }
+    ed.selSet = new Set([a])
+    if (tabletMQ.matches && prev?.a !== a) els.props?.classList.add('open') // drawer slides in with the object's options
     if (prev && prev.page !== page) ed.viewOf(prev.page)?.redraw()
     ed.viewOf(page)?.redraw()
     ed.refreshProps()
+  }
+  ed.selectMany = (page, list) => {
+    list = list.filter((a) => page.annots.includes(a))
+    if (!list.length) { ed.select(null); return }
+    if (list.length === 1) { ed.select(page, list[0]); return }
+    clearPdfImg()
+    const prev = ed.sel
+    ed.sel = { page, a: list[list.length - 1] }
+    ed.selSet = new Set(list)
+    if (prev && prev.page !== page) ed.viewOf(prev.page)?.redraw()
+    ed.viewOf(page)?.redraw()
+    ed.refreshProps()
+  }
+  ed.toggleSelect = (page, a) => {
+    if (ed.sel?.page !== page) { ed.select(page, a); return }
+    const list = [...ed.selSet]
+    ed.selectMany(page, ed.selSet.has(a) ? list.filter((x) => x !== a) : [...list, a])
+  }
+  ed.selectAll = () => {
+    const p = ed.current
+    if (!p) return
+    if (ed.tool !== 'select') ed.setTool('select')
+    ed.selectMany(p, p.annots.filter((a) => !a.hidden && !a.locked && a.t !== 'imgremove'))
+  }
+  ed.selected = () => (ed.sel ? [...ed.selSet].filter((a) => ed.sel.page.annots.includes(a)) : [])
+  /** Scroll the page area (two-finger pan, pen-mode finger pan). */
+  ed.panBy = (dx, dy) => {
+    if (!els.scroll) return
+    els.scroll.scrollLeft += dx
+    els.scroll.scrollTop += dy
   }
   let propsT = 0
   ed.refreshProps = (soft = false) => {
@@ -340,11 +398,16 @@ export function Edit(params = {}) {
     return a
   }
   ed.deleteSel = () => {
+    if (ed.pdfImg) { ed.deletePdfImage(); return }
     if (!ed.sel) return
-    const { page, a } = ed.sel
-    page.annots = page.annots.filter((x) => x !== a)
+    const { page } = ed.sel
+    const gone = new Set(ed.selected().filter((a) => !a.locked))
+    if (!gone.size) { ed.hint('That item is locked — unlock it in Layers first'); return }
+    if (ed.cropping && gone.has(ed.cropping.a)) ed.cropping = null
+    page.annots = page.annots.filter((x) => !gone.has(x))
     ed.sel = null
-    if (a.t === 'textedit') ed.viewOf(page)?.render() // bring the original text back
+    ed.selSet.clear()
+    if ([...gone].some((a) => a.t === 'textedit')) ed.viewOf(page)?.render() // bring the original text back
     else ed.viewOf(page)?.redraw()
     ed.refreshProps()
     ed.commit('Delete')
@@ -357,19 +420,78 @@ export function Edit(params = {}) {
   }
   ed.duplicate = () => {
     if (!ed.sel) return
-    const { page, a } = ed.sel
-    if (a.t === 'textedit') { toast('Edited text can’t be duplicated — use the Text tool instead', { type: 'info' }); return }
-    const c = annClone(a)
-    move(c, 12, 12)
-    ed.add(page, c)
+    const { page } = ed.sel
+    const src = ed.selected().filter((a) => a.t !== 'textedit')
+    if (!src.length) { toast('Edited text can’t be duplicated — use the Text tool instead', { type: 'info' }); return }
+    const copies = src.map((a) => { const c = annClone(a); move(c, 12, 12); c.id = uid(); c.locked = false; page.annots.push(c); return c })
+    ed.selectMany(page, copies)
+    ed.commit('Duplicate')
   }
+  /** where: 'front' | 'back' | 'forward' | 'backward' — applies to the whole selection. */
   ed.reorder = (where) => {
     if (!ed.sel) return
-    const { page, a } = ed.sel
-    page.annots = page.annots.filter((x) => x !== a)
-    if (where === 'front') page.annots.push(a); else page.annots.unshift(a)
+    const { page } = ed.sel
+    const set = new Set(ed.selected())
+    const list = page.annots
+    if (where === 'front' || where === 'back') {
+      const rest = list.filter((x) => !set.has(x)), mine = list.filter((x) => set.has(x))
+      page.annots = where === 'front' ? [...rest, ...mine] : [...mine, ...rest]
+    } else if (where === 'forward') {
+      for (let i = list.length - 2; i >= 0; i--) if (set.has(list[i]) && !set.has(list[i + 1])) [list[i], list[i + 1]] = [list[i + 1], list[i]]
+    } else {
+      for (let i = 1; i < list.length; i++) if (set.has(list[i]) && !set.has(list[i - 1])) [list[i], list[i - 1]] = [list[i - 1], list[i]]
+    }
     ed.viewOf(page)?.redraw()
+    ed.refreshProps()
     ed.commit('Arrange')
+  }
+  /** Move one object to a stacking index (layers panel drag). */
+  ed.moveLayer = (page, a, toIndex) => {
+    const list = page.annots.filter((x) => x !== a)
+    list.splice(Math.max(0, Math.min(list.length, toIndex)), 0, a)
+    page.annots = list
+    ed.viewOf(page)?.redraw()
+    ed.refreshProps()
+    ed.commit('Arrange')
+  }
+  /** Align / distribute the selection (or a single object to the page). */
+  ed.align = (how) => {
+    if (!ed.sel) return
+    const { page } = ed.sel
+    const items = ed.selected().filter((a) => !a.locked)
+    if (!items.length) return
+    const bs = items.map((a) => annBounds(a))
+    let ref
+    if (items.length === 1) ref = { x: 0, y: 0, w: page.w, h: page.h }
+    else {
+      const x0 = Math.min(...bs.map((b) => b.x)), y0 = Math.min(...bs.map((b) => b.y))
+      ref = { x: x0, y: y0, w: Math.max(...bs.map((b) => b.x + b.w)) - x0, h: Math.max(...bs.map((b) => b.y + b.h)) - y0 }
+    }
+    if (how === 'dh' || how === 'dv') {
+      if (items.length < 3) { ed.hint('Select 3 or more items to distribute'); return }
+      const hz = how === 'dh'
+      const order = items.map((a, i) => [a, bs[i]]).sort((p, q) => (hz ? p[1].x - q[1].x : p[1].y - q[1].y))
+      const total = order.reduce((s2, [, b]) => s2 + (hz ? b.w : b.h), 0)
+      const gap = ((hz ? ref.w : ref.h) - total) / (order.length - 1)
+      let at = hz ? ref.x : ref.y
+      for (const [a, b] of order) { move(a, hz ? at - b.x : 0, hz ? 0 : at - b.y); at += (hz ? b.w : b.h) + gap }
+    } else {
+      items.forEach((a, i) => {
+        const b = bs[i]
+        const dx = how === 'l' ? ref.x - b.x : how === 'c' ? ref.x + ref.w / 2 - (b.x + b.w / 2) : how === 'r' ? ref.x + ref.w - (b.x + b.w) : 0
+        const dy = how === 't' ? ref.y - b.y : how === 'm' ? ref.y + ref.h / 2 - (b.y + b.h / 2) : how === 'b' ? ref.y + ref.h - (b.y + b.h) : 0
+        move(a, dx, dy)
+      })
+    }
+    ed.viewOf(page)?.redraw()
+    ed.commit('Align')
+  }
+  ed.setFlag = (page, a, key, val) => {
+    a[key] = val
+    if (val && (key === 'hidden' || key === 'locked') && ed.selSet.has(a)) ed.selectMany(page, ed.selected().filter((x) => x !== a))
+    ed.viewOf(page)?.redraw()
+    ed.refreshProps()
+    ed.commit(key === 'hidden' ? 'Visibility' : 'Lock')
   }
   ed.editSelected = () => { if (ed.sel && (ed.sel.a.t === 'text' || ed.sel.a.t === 'textedit')) ed.viewOf(ed.sel.page)?.editText(ed.sel.a) }
   ed.dblClick = (page, a) => {
@@ -424,38 +546,192 @@ export function Edit(params = {}) {
   }
   ed.contextMenu = (e, page, a) => {
     const anchor = { getBoundingClientRect: () => ({ left: e.clientX, right: e.clientX, top: e.clientY, bottom: e.clientY }) }
+    const many = ed.selSet.size > 1
     menu(anchor, [
-      a.t === 'text' || a.t === 'textedit' ? { label: 'Edit text', icon: 'pencil', kbd: 'Enter', onClick: () => ed.dblClick(page, a) } : null,
+      !many && (a.t === 'text' || a.t === 'textedit') ? { label: 'Edit text', icon: 'pencil', kbd: 'Enter', onClick: () => ed.dblClick(page, a) } : null,
+      !many && a.t === 'image' ? { label: 'Crop image', icon: 'crop', onClick: () => ed.startCrop(page, a) } : null,
+      !many && a.t === 'image' ? { label: 'Save image as PNG', icon: 'download', onClick: () => ed.saveImage(a) } : null,
       { label: 'Duplicate', icon: 'copy', kbd: 'Ctrl+D', onClick: () => ed.duplicate() },
       { label: 'Copy', icon: 'copy', kbd: 'Ctrl+C', onClick: () => copySel() },
       { label: 'Bring to front', icon: 'front', onClick: () => ed.reorder('front') },
+      { label: 'Bring forward', icon: 'up', onClick: () => ed.reorder('forward') },
+      { label: 'Send backward', icon: 'down', onClick: () => ed.reorder('backward') },
       { label: 'Send to back', icon: 'back', onClick: () => ed.reorder('back') },
+      { label: 'Lock', icon: 'lock', onClick: () => { for (const x of ed.selected()) x.locked = true; ed.select(null); ed.commit('Lock') } },
       'sep',
-      { label: 'Delete', icon: 'trash', danger: true, kbd: 'Del', onClick: () => ed.deleteSel() },
+      { label: many ? `Delete ${ed.selSet.size} items` : 'Delete', icon: 'trash', danger: true, kbd: 'Del', onClick: () => ed.deleteSel() },
     ])
   }
 
   // ---------- images & signatures ----------
-  ed.bitmap = (a) => {
+  // Image previews: the source is decoded once to a (≤1000px) RGBA buffer per
+  // srcKey; the fx pipeline runs on that and is cached per look, so dragging a
+  // slider re-processes a small buffer only, and the export runs the identical
+  // pipeline at full resolution.
+  const PREVIEW_MAX = 1000
+  const srcs = new WeakMap() // srcKey → {rgba,w,h} | null (pending)
+  const looks = new WeakMap() // srcKey → Map(lookKey → result)
+  const decodeSrc = async (a) => {
+    let cv
+    if (a.rgba) {
+      cv = document.createElement('canvas')
+      cv.width = a.iw
+      cv.height = a.ih
+      cv.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(a.rgba), a.iw, a.ih), 0, 0)
+    } else cv = await createImageBitmap(new Blob([a.jpeg], { type: 'image/jpeg' }))
+    const k = Math.min(1, PREVIEW_MAX / Math.max(a.iw, a.ih))
+    const c = document.createElement('canvas')
+    c.width = Math.max(1, Math.round(a.iw * k))
+    c.height = Math.max(1, Math.round(a.ih * k))
+    const x = c.getContext('2d')
+    x.drawImage(cv, 0, 0, c.width, c.height)
+    cv.close?.()
+    return { rgba: x.getImageData(0, 0, c.width, c.height).data, w: c.width, h: c.height, canvas: c }
+  }
+  const toCanvas = (r) => {
+    const c = document.createElement('canvas')
+    c.width = r.w
+    c.height = r.h
+    c.getContext('2d').putImageData(new ImageData(r.rgba, r.w, r.h), 0, 0)
+    return c
+  }
+  const lookKey = (a, full) => JSON.stringify([a.fx ?? null, full ? null : a.crop ?? null, !!a.flipH, !!a.flipV, full])
+  ed.bitmap = (a, { full = false } = {}) => {
     if (a.t !== 'image') return null
-    const key = a.srcKey ?? a
-    const b = ed.bitmaps.get(key)
-    if (b !== undefined) return b
-    ed.bitmaps.set(key, null)
-    ;(async () => {
-      if (a.rgba) {
-        const c = document.createElement('canvas')
-        c.width = a.iw
-        c.height = a.ih
-        c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(a.rgba), a.iw, a.ih), 0, 0)
-        return c
-      }
-      return createImageBitmap(new Blob([a.jpeg], { type: 'image/jpeg' }))
-    })().then((bm) => {
-      ed.bitmaps.set(key, bm)
-      for (const v of ed.views) if (v.page.annots.some((x) => (x.srcKey ?? x) === key)) v.redraw()
-    }).catch(() => {})
-    return null
+    const key = a.srcKey ?? (a.srcKey = {})
+    const src = srcs.get(key)
+    if (src === undefined) {
+      srcs.set(key, null)
+      decodeSrc(a).then((s) => {
+        srcs.set(key, s)
+        for (const v of ed.views) if (v.page.annots.some((x) => x.srcKey === key)) v.redraw()
+        if (ed.sel?.a.srcKey === key) ed.refreshProps() // preset thumbnails need the pixels
+      }).catch(() => {})
+      return null
+    }
+    if (!src) return null
+    const fx = full ? { ...(a.fx ?? {}), shadow: null } : a.fx ?? {}
+    const geo = { crop: full ? null : a.crop, srcW: a.iw, flipH: a.flipH, flipV: a.flipV }
+    if (fxIsIdentity(fx, geo)) return { src: src.canvas, ox: 0, oy: 0, innerW: src.w, innerH: src.h }
+    let m = looks.get(key)
+    if (!m) looks.set(key, (m = new Map()))
+    const lk = lookKey(a, full)
+    let r = m.get(lk)
+    if (!r) {
+      const out = processImage(src, geo, fx)
+      r = { src: toCanvas(out), ox: out.ox, oy: out.oy, innerW: out.innerW, innerH: out.innerH }
+      if (m.size > 6) m.delete(m.keys().next().value) // a slider drag makes many looks: keep a few
+      m.set(lk, r)
+    }
+    return r
+  }
+  ed.imageSrc = (a) => (a.srcKey && srcs.get(a.srcKey)) || null
+  /** Full-resolution processed pixels of an image object (export / save). */
+  ed.imageFull = async (a) => {
+    const cv = a.rgba ? null : await createImageBitmap(new Blob([a.jpeg], { type: 'image/jpeg' }))
+    let rgba = a.rgba ? new Uint8ClampedArray(a.rgba) : null
+    if (cv) {
+      const c = document.createElement('canvas')
+      c.width = a.iw
+      c.height = a.ih
+      const x = c.getContext('2d')
+      x.drawImage(cv, 0, 0)
+      cv.close?.()
+      rgba = x.getImageData(0, 0, a.iw, a.ih).data
+    }
+    return processImage({ rgba, w: a.iw, h: a.ih }, { crop: a.crop, srcW: a.iw, flipH: a.flipH, flipV: a.flipV }, a.fx ?? {})
+  }
+  ed.saveImage = async (a) => {
+    const r = await ed.imageFull(a)
+    const blob = await new Promise((res) => toCanvas(r).toBlob(res, 'image/png'))
+    saveBlob(blob, `${ed.fileName || 'image'}-image.png`)
+  }
+
+  // ---------- image crop mode ----------
+  ed.startCrop = (page, a) => {
+    if (a.t !== 'image' || a.locked) return
+    if (a.rot) { ed.hint('Straighten the image (rotation 0°) to crop it'); return }
+    ed.select(page, a)
+    ed.cropping = { page, a, before: annClone(a) }
+    ed.cropAspect = null
+    ed.viewOf(page)?.redraw()
+    ed.refreshProps()
+    ed.hint('Drag the edges to crop · Enter to apply · Esc to cancel')
+  }
+  ed.finishCrop = (apply = true) => {
+    const c = ed.cropping
+    if (!c) return
+    ed.cropping = null
+    if (!apply) Object.assign(c.a, c.before)
+    else {
+      const cr = c.a.crop
+      if (cr && cr.x <= 0.5 && cr.y <= 0.5 && cr.w >= c.a.iw - 0.5 && cr.h >= c.a.ih - 0.5) delete c.a.crop
+      if (JSON.stringify(c.a.crop ?? null) !== JSON.stringify(c.before.crop ?? null)) ed.commit('Crop')
+    }
+    ed.viewOf(c.page)?.redraw()
+    ed.refreshProps()
+  }
+
+  // ---------- images already inside the PDF ----------
+  ed.selectPdfImage = (page, op, box) => {
+    ed.select(null)
+    ed.pdfImg = { page, op, box }
+    if (tabletMQ.matches) els.props?.classList.add('open')
+    ed.viewOf(page)?.redraw()
+    ed.refreshProps()
+  }
+  /** Rasterise a PDF image op exactly as it appears (orientation, mirror) into RGBA. */
+  const pdfImagePixels = async (page, op, box) => {
+    const src = await imageSource(ed.doc, op, ed.imgCache)
+    if (!src) throw new Error('This image format can’t be edited in the browser')
+    const sw = src.width, sh = src.height
+    const k = Math.min(2400 / Math.max(sw, sh), Math.max(sw / box.w, sh / box.h, 1)) // keep the native resolution
+    const W = Math.max(1, Math.round(box.w * k)), H = Math.max(1, Math.round(box.h * k))
+    const c = document.createElement('canvas')
+    c.width = W
+    c.height = H
+    const x = c.getContext('2d')
+    const m = op.m
+    x.setTransform(k * m[0], k * m[1], k * m[2], k * m[3], k * (m[4] - box.x), k * (m[5] - box.y))
+    x.transform(1, 0, 0, -1, 0, 1)
+    x.imageSmoothingQuality = 'high'
+    x.globalAlpha = op.a ?? 1
+    x.drawImage(src, 0, 0, 1, 1)
+    return { rgba: x.getImageData(0, 0, W, H).data, iw: W, ih: H }
+  }
+  ed.editPdfImage = async () => {
+    const pi = ed.pdfImg
+    if (!pi) return null
+    try {
+      const px = await pdfImagePixels(pi.page, pi.op, pi.box)
+      pi.page.annots.push({ id: uid(), t: 'imgremove', region: { ...pi.box } })
+      ed.pdfImg = null
+      const a = { id: uid(), t: 'image', ...pi.box, ...px, srcKey: {}, alpha: 1 }
+      pi.page.annots.push(a)
+      ed.viewOf(pi.page)?.render()
+      ed.select(pi.page, a)
+      ed.commit('Edit image')
+      return a
+    } catch (e) { toast(friendly(e), { type: 'error' }); return null }
+  }
+  ed.deletePdfImage = () => {
+    const pi = ed.pdfImg
+    if (!pi) return
+    pi.page.annots.push({ id: uid(), t: 'imgremove', region: { ...pi.box } })
+    ed.pdfImg = null
+    ed.viewOf(pi.page)?.render()
+    ed.refreshProps()
+    ed.commit('Delete image')
+    toast('Image removed — it’s taken out of the file when you download', { type: 'info' })
+  }
+  ed.savePdfImage = async () => {
+    const pi = ed.pdfImg
+    if (!pi) return
+    try {
+      const px = await pdfImagePixels(pi.page, pi.op, pi.box)
+      const blob = await new Promise((res) => toCanvas({ rgba: px.rgba, w: px.iw, h: px.ih }).toBlob(res, 'image/png'))
+      saveBlob(blob, `${ed.fileName || 'page'}-image.png`)
+    } catch (e) { toast(friendly(e), { type: 'error' }) }
   }
   const placeOnPage = (img, opts = {}) => {
     const p = ed.current ?? ed.pages[0]
@@ -629,6 +905,9 @@ export function Edit(params = {}) {
     })
     ed.values = { ...s.values }
     ed.sel = null
+    ed.selSet.clear()
+    ed.pdfImg = null
+    ed.cropping = null
     if (structural) rebuildViews()
     for (const v of ed.views) { v.invalidateRuns(); if (v.near || v.rendered) v.render(); v.layoutFields() }
     ed.refreshProps()
@@ -636,6 +915,7 @@ export function Edit(params = {}) {
   }
   ed.undo = () => {
     ed.closeEditor(true)
+    if (ed.cropping) { ed.finishCrop(false); return }
     if (!ed.history.length) return
     ed.future.push(last)
     last = ed.history.pop()
@@ -655,34 +935,85 @@ export function Edit(params = {}) {
 
   // ---------- clipboard ----------
   const copySel = () => {
-    if (ed.sel && ed.sel.a.t !== 'textedit') { ed.clipboard = annClone(ed.sel.a); toast('Copied', { type: 'info', timeout: 1200 }) }
+    const list = ed.selected().filter((a) => a.t !== 'textedit')
+    if (list.length) { ed.clipboard = list.map((a) => annClone(a)); toast(list.length > 1 ? `Copied ${list.length} items` : 'Copied', { type: 'info', timeout: 1200 }) }
   }
   const paste = () => {
-    if (!ed.clipboard) return
-    const c = annClone(ed.clipboard)
-    move(c, 14, 14)
-    ed.clipboard = annClone(c)
-    ed.add(ed.current, c)
+    if (!ed.clipboard?.length) return
+    const p = ed.current
+    const copies = ed.clipboard.map((a) => { const c = annClone(a); move(c, 14, 14); c.id = uid(); c.locked = false; p.annots.push(c); return c })
+    ed.clipboard = copies.map((c) => annClone(c))
+    if (ed.tool !== 'select') ed.setTool('select')
+    ed.selectMany(p, copies)
+    ed.commit('Paste')
   }
 
   // ---------- export ----------
-  async function doExport({ flatten = false }) {
+  const pickPages = (pages, range) => {
+    const n = ed.pages.length
+    if (pages === 'current') return [Math.max(0, ed.pages.indexOf(ed.current))]
+    if (pages === 'range') {
+      const list = parseRanges(range || '', n).flatMap(({ from, to }) => Array.from({ length: to - from + 1 }, (_, k) => from - 1 + k))
+      const ok = [...new Set(list)].filter((i) => i >= 0 && i < n)
+      if (!ok.length) throw new Error('Type which pages to save, e.g. 1-3, 5')
+      return ok
+    }
+    return ed.pages.map((_, i) => i)
+  }
+  /**
+   * opts: {format: 'pdf'|'png'|'jpg', pages: 'all'|'current'|'range', range, dpi, quality, flatten, name}
+   * Images are rendered from the exported PDF, so they show exactly what the PDF contains.
+   */
+  async function doExport({ flatten = false, format = 'pdf', pages = 'all', range = '', dpi = 150, quality = 0.9, name = '' } = {}) {
     ed.closeEditor(true)
+    ed.finishCrop(true)
     const btn = els.download
     btn.disabled = true
     const label = btn.lastChild
     const orig = label.textContent
     try {
       const anyField = Object.keys(ed.values).length > 0
-      const out = await exportEdited(ed.info, ed.pages, {
-        forms: anyField || flatten ? { values: ed.values, flatten } : null,
-        onStep: (s) => { label.textContent = `${s}…` },
+      const idx = pickPages(pages, range)
+      const all = idx.length === ed.pages.length && idx.every((v, k) => v === k)
+      // a PDF of some pages: export just those; images: export everything, render the picks
+      const subset = format === 'pdf' && !all
+      const out = await exportEdited(ed.info, subset ? idx.map((i) => ed.pages[i]) : ed.pages, {
+        forms: anyField || flatten ? { values: ed.values, flatten: flatten || format !== 'pdf' } : null,
+        onStep: (st) => { label.textContent = `${st}…` },
       })
-      const baseName = (ed.fileName || stem(ed.info.name)).replace(/\.pdf$/i, '')
-      const name = `${baseName}${baseName === stem(ed.info.name) ? '-edited' : ''}.pdf`
-      saveBlob(new Blob([out], { type: 'application/pdf' }), name)
-      ed.dirty = false
-      toast(`Saved ${name} · ${fmtBytes(out.length)}`)
+      const baseName = (name || ed.fileName || stem(ed.info.name)).trim().replace(/\.(pdf|png|jpe?g|zip)$/i, '')
+      const base = `${baseName}${baseName === stem(ed.info.name) ? '-edited' : ''}`
+      if (format === 'pdf') {
+        const fname = `${base}.pdf`
+        saveBlob(new Blob([out], { type: 'application/pdf' }), fname)
+        toast(`Saved ${fname} · ${fmtBytes(out.length)}`)
+        if (all) ed.dirty = false
+      } else {
+        const doc = await parsePdf(out)
+        const leaves = pageLeaves(doc)
+        const mime = format === 'jpg' ? 'image/jpeg' : 'image/png'
+        const cache = new Map()
+        const files = []
+        for (let k = 0; k < idx.length; k++) {
+          const i = idx[k]
+          label.textContent = `Page ${k + 1}/${idx.length}…`
+          const width = Math.min(Math.round((ed.pages[i].w * dpi) / 72), 9000) // ~40 MP cap keeps the tab alive
+          const cv = await renderPage(doc, leaves[i], { width, cache })
+          const blob = await new Promise((r) => cv.toBlob(r, mime, format === 'jpg' ? quality : undefined))
+          if (!blob) throw new Error(`Couldn’t encode page ${i + 1} (too large?)`)
+          files.push({ name: `${base}-page-${String(i + 1).padStart(String(ed.pages.length).length, '0')}.${format}`, data: new Uint8Array(await blob.arrayBuffer()) })
+          await yieldUI()
+        }
+        if (files.length === 1) {
+          saveBlob(new Blob([files[0].data], { type: mime }), files[0].name)
+          toast(`Saved ${files[0].name} · ${fmtBytes(files[0].data.length)}`)
+        } else {
+          const zip = zipStore(files)
+          saveBlob(new Blob([zip], { type: 'application/zip' }), `${base}-${format}.zip`)
+          toast(`Saved ${files.length} images in ${base}-${format}.zip · ${fmtBytes(zip.length)}`)
+        }
+      }
+      ed.lastExport = { format, pages: idx.length }
     } catch (e) {
       console.error(e)
       toast(`Couldn’t save: ${friendly(e)}`, { type: 'error' })
@@ -690,6 +1021,45 @@ export function Edit(params = {}) {
       btn.disabled = false
       label.textContent = orig
     }
+  }
+  const EXPORT_KEY = 'pdfsuite-export'
+  ed.exportDialog = () => {
+    ed.closeEditor(true)
+    let o = { format: 'pdf', pages: 'all', dpi: 150, quality: 0.9, flatten: false }
+    try { o = { ...o, ...JSON.parse(localStorage.getItem(EXPORT_KEY) ?? '{}') } } catch { /* private mode */ }
+    o.range = ''
+    o.name = ed.fileName || stem(ed.info.name)
+    const body = h('div', { class: 'xport' })
+    const est = () => {
+      const p = ed.current ?? ed.pages[0]
+      return `${Math.round((p.w * o.dpi) / 72)} × ${Math.round((p.h * o.dpi) / 72)} px per page`
+    }
+    const paint = () => {
+      const img = o.format !== 'pdf'
+      const count = o.pages === 'all' ? ed.pages.length : o.pages === 'current' ? 1 : 2
+      setKids(body,
+        Field('Save as', Seg([['pdf', 'PDF', 'file'], ['png', 'PNG', 'image'], ['jpg', 'JPG', 'image']], o.format, (v) => { o.format = v; paint() }, { block: true })),
+        Field('Pages', Seg([['all', `All ${ed.pages.length}`], ['current', `Page ${ed.pages.indexOf(ed.current) + 1}`], ['range', 'Choose…']], o.pages, (v) => { o.pages = v; paint() }, { block: true })),
+        o.pages === 'range' ? Field('Which pages', TextInput(o.range, (v) => { o.range = v }, { placeholder: `e.g. 1-3, 5 (of ${ed.pages.length})` })) : null,
+        img ? Field('Resolution', Seg([['72', 'Screen'], ['150', 'Standard'], ['220', 'High'], ['300', 'Print']], String(o.dpi), (v) => { o.dpi = +v; paint() }, { block: true }), { hint: `${o.dpi} DPI · ${est()}` }) : null,
+        img && o.format === 'jpg' ? Field('JPG quality', Range(Math.round(o.quality * 100), { min: 40, max: 100, fmt: (v) => `${v}%` }, (v) => { o.quality = v / 100 })) : null,
+        !img && ed.fields.length ? Switch('Flatten form fields', !!o.flatten, (v) => { o.flatten = v }, { hint: 'Fixes the answers into the page so they can’t be changed' }) : null,
+        Field('File name', TextInput(o.name, (v) => { o.name = v })),
+        img && count > 1 ? h('div', { class: 'tip' }, 'Several pages download together in one .zip file.') : null)
+    }
+    paint()
+    modal({
+      title: 'Download', body: [body],
+      actions: [{ label: 'Cancel' }, {
+        label: 'Download', variant: 'primary', onClick: () => {
+          if (o.pages === 'range') {
+            try { pickPages('range', o.range) } catch (e) { toast(/bad range/.test(e.message) ? 'Use page numbers like 1-3, 5' : e.message, { type: 'error' }); return false }
+          }
+          try { localStorage.setItem(EXPORT_KEY, JSON.stringify({ format: o.format, pages: o.pages === 'range' ? 'all' : o.pages, dpi: o.dpi, quality: o.quality, flatten: o.flatten })) } catch { /* private mode */ }
+          doExport({ ...o })
+        },
+      }],
+    })
   }
   ed._export = doExport // test hook
 
@@ -715,7 +1085,8 @@ export function Edit(params = {}) {
     const k = e.key.toLowerCase()
     if (mod && k === 'z' && !e.shiftKey) { e.preventDefault(); ed.undo() }
     else if (mod && (k === 'y' || (k === 'z' && e.shiftKey))) { e.preventDefault(); ed.redo() }
-    else if (mod && k === 's') { e.preventDefault(); doExport({}) }
+    else if (mod && k === 's' && !e.shiftKey) { e.preventDefault(); doExport({}) }
+    else if (mod && e.shiftKey && k === 's') { e.preventDefault(); ed.exportDialog() }
     else if (mod && k === 'c') copySel()
     else if (mod && k === 'v') { e.preventDefault(); paste() }
     else if (mod && k === 'd') { e.preventDefault(); ed.duplicate() }
@@ -727,12 +1098,16 @@ export function Edit(params = {}) {
       const key = { b: 'bold', i: 'italic', u: 'underline' }[k]
       ed.sel.a[key] = !ed.sel.a[key]
       ed.redrawCurrent(); ed.refreshProps(); ed.commit('Style')
-    } else if ((e.key === 'Delete' || e.key === 'Backspace') && ed.sel) { e.preventDefault(); ed.deleteSel() }
-    else if (e.key === 'Escape') { if (ed.sel) ed.select(null); else if (ed.tool !== 'select') ed.setTool('select') }
+    } else if (ed.cropping && (e.key === 'Enter' || e.key === 'Escape')) { e.preventDefault(); ed.finishCrop(e.key === 'Enter') }
+    else if (mod && k === 'a') { e.preventDefault(); ed.selectAll() }
+    else if (mod && k === 'e') { e.preventDefault(); ed.exportDialog() }
+    else if ((e.key === 'Delete' || e.key === 'Backspace') && (ed.sel || ed.pdfImg)) { e.preventDefault(); ed.deleteSel() }
+    else if (e.key === 'Escape') { if (ed.sel || ed.pdfImg) ed.select(null); else if (ed.tool !== 'select') ed.setTool('select') }
+    else if (e.key === '[' || e.key === ']') { if (ed.sel) { e.preventDefault(); ed.reorder(e.key === ']' ? (mod ? 'front' : 'forward') : (mod ? 'back' : 'backward')) } }
     else if (e.key.startsWith('Arrow') && ed.sel) {
       e.preventDefault()
       const d = e.shiftKey ? 10 : 1
-      move(ed.sel.a, e.key === 'ArrowLeft' ? -d : e.key === 'ArrowRight' ? d : 0, e.key === 'ArrowUp' ? -d : e.key === 'ArrowDown' ? d : 0)
+      for (const a of ed.selected()) if (!a.locked) move(a, e.key === 'ArrowLeft' ? -d : e.key === 'ArrowRight' ? d : 0, e.key === 'ArrowUp' ? -d : e.key === 'ArrowDown' ? d : 0)
       ed.redrawCurrent()
       clearTimeout(ed._nt)
       ed._nt = setTimeout(() => ed.commit('Nudge'), 400)

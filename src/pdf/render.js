@@ -16,7 +16,7 @@ export const fontCss = (f, px) => {
 }
 
 /** Decode an image op once per doc → CanvasImageSource | null (cached). */
-async function imageSource(doc, op, cache) {
+export async function imageSource(doc, op, cache) {
   const key = op.ref ?? op.inline
   if (key && cache.has(key)) return cache.get(key)
   const p = (async () => {

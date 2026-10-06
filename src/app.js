@@ -6,6 +6,7 @@ import { Merge } from './tools/merge.js'
 import { Split } from './tools/split.js'
 import { Organize } from './tools/organize.js'
 import { Rotate } from './tools/rotate.js'
+import { Crop } from './tools/crop.js'
 import { ImgToPdf } from './tools/img2pdf.js'
 import { ExtractImgs } from './tools/extract.js'
 import { PageNums } from './tools/pagenum.js'
@@ -18,7 +19,7 @@ import { Protect, Unlock } from './tools/protect.js'
 import { Edit } from './tools/edit.js'
 
 const VIEWS = {
-  edit: Edit, merge: Merge, split: Split, organize: Organize, rotate: Rotate, img2pdf: ImgToPdf,
+  edit: Edit, merge: Merge, split: Split, organize: Organize, rotate: Rotate, crop: Crop, img2pdf: ImgToPdf,
   extract: ExtractImgs, pagenum: PageNums, metadata: Metadata, pdf2img: PdfToImg, pdftext: PdfToText,
   compress: Compress, watermark: Watermark, protect: Protect, unlock: Unlock,
 }

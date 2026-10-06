@@ -22,7 +22,11 @@ Open devtools → Network: nothing carrying your document ever leaves the page. 
 ## Tools
 
 **Edit & sign**
-- **Edit PDF** — a full-screen editor: **change existing text** (click it and retype; the original is removed, the font matched), add text with fonts/sizes/styles/alignment, freehand drawing with pen pressure, text highlighting that snaps to lines, shapes and arrows, whiteout, images, signatures, check/cross/date marks and stamps, sticky-note comments and links. Continuous page scroll, page thumbnails with reorder/rotate/insert/delete, undo/redo, copy/paste, keyboard shortcuts, pinch-zoom and a phone layout.
+- **Edit PDF** — a full-screen editor: **change existing text** (click it and retype; the original is removed, the font matched), add text with fonts/sizes/styles/alignment, letter spacing, line height, outline and shadow; freehand drawing with pen pressure and an **eraser** that cuts strokes; text highlighting that snaps to lines; rectangles, ellipses, triangles, stars, polygons, lines and arrows with separate fill opacity; whiteout, signatures, check/cross/date marks, stamps, sticky-note comments and links.
+  - **Image editing, built in** — for pictures you add *and* pictures already inside the PDF (click one to edit, save or delete it): crop with aspect presets, flip, free rotation, 11 one-tap filters, brightness/contrast/exposure/saturation/warmth/tint/hue, blur, sharpen, vignette, grain, **background removal**, rounded corners, borders, drop shadows, opacity and blend modes. The preview and the saved file run the same pixel pipeline, so what you see is what you get.
+  - **Objects** — rotate anything with its handle (Shift = 15° steps), snapping guides to page edges, centres and other objects, multi-select (Shift-click or drag a box) with align and distribute, a **Layers** panel to reorder, hide, lock and rename, bring forward / send backward.
+  - **Download as you like** — PDF (all pages, this page or a range; flattened forms optional) or **PNG / JPG images** at screen-to-print resolution, several pages zipped.
+  - Continuous page scroll, page thumbnails with reorder/rotate/insert/delete, undo/redo, copy/paste, keyboard shortcuts. **Phones and tablets**: bottom tool bar and sheet on phones, a slide-over panel on iPad, pinch-zoom with two-finger pan, long-press menus, big touch handles, and Apple Pencil palm rejection (once the pencil draws, fingers scroll).
 - **Sign PDF** — draw, type or upload a signature (paper background removed automatically), saved on your device for next time; click a signature field to sign into it.
 - **Fill forms** — real inputs over the PDF's text fields, checkboxes, radio buttons and dropdowns; values get proper appearance streams so every viewer shows them; optional flattening.
 - **Redact** — *true* redaction: glyphs under the boxes are removed from the content stream (the rest of the line keeps its position), image pixels underneath are painted out and re-encoded, links and comments go. **Search & redact** finds words, emails, phone numbers or long numbers on every page.
@@ -34,6 +38,7 @@ Open devtools → Network: nothing carrying your document ever leaves the page. 
 - **Split** — pick pages visually, custom ranges, every N pages, or one file per page (ZIP).
 - **Organize pages** — drag to reorder, rotate, duplicate, delete, insert blank pages or pages from another PDF, multi-select with bulk actions, undo/redo.
 - **Rotate** — click pages or rotate all/odd/even.
+- **Crop** — drag a crop box over the page or auto-detect the content margins; apply to all, one, odd or even pages (rotated pages handled).
 
 **Convert**
 - **Images → PDF** — JPG/PNG/WebP/GIF/BMP; JPEGs embedded losslessly with their EXIF orientation honoured, PNG transparency kept; page size, orientation, margins, fit.
