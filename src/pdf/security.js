@@ -71,7 +71,7 @@ function computeU(fileKey, id0, R) {
 // ---------- R5/R6 (SHA-2 / AES-256) ----------
 
 /** Algorithm 2.B (R6) — or plain SHA-256 for R5. */
-function hash2B(pwd, salt, udata, R) {
+export function hash2B(pwd, salt, udata, R) {
   let K = sha256(concat([pwd, salt, udata]))
   if (R === 5) return K
   for (let round = 0; ; round++) {
@@ -83,7 +83,7 @@ function hash2B(pwd, salt, udata, R) {
     for (let i = 0; i < 16; i++) sum += E[i]
     const m = sum % 3
     K = m === 0 ? sha256(E) : m === 1 ? sha384(E) : sha512(E)
-    if (round >= 63 && E[E.length - 1] <= round - 32) break
+    if (round >= 63 && E[E.length - 1] <= round + 1 - 32) break // round numbers count from 1 (qpdf, Acrobat)
   }
   return K.slice(0, 32)
 }
