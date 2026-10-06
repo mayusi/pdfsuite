@@ -12976,8 +12976,7 @@ function Studio() {
     if (S.opts.select.feather > 0) next = maskFeather(next, S.doc.w, S.doc.h, S.opts.select.feather)
     S.setSel(next, label)
   }
-  function samplePixel(x, y) {
-    const c = flatten(S.doc)
+  function samplePixel(x, y, c = flatten(S.doc)) {
     const d = c.getContext('2d').getImageData(Math.max(0, Math.min(S.doc.w - 1, Math.floor(x))), Math.max(0, Math.min(S.doc.h - 1, Math.floor(y))), 1, 1).data
     return '#' + [d[0], d[1], d[2]].map((v) => v.toString(16).padStart(2, '0')).join('')
   }
@@ -13082,8 +13081,8 @@ function Studio() {
         guide = { kind: 'line', x0: x, y0: y, x1: x, y1: y }
         break
       case 'eyedropper':
-        S.setColor(e.altKey ? 'bg' : 'fg', samplePixel(x, y))
-        gesture = { kind: 'pick', alt: e.altKey }
+        gesture = { kind: 'pick', alt: e.altKey, flat: flatten(S.doc) } // flatten once per drag, not per move
+        S.setColor(e.altKey ? 'bg' : 'fg', samplePixel(x, y, gesture.flat))
         break
       case 'text': {
         const hit = pickLayerAt(x, y)
@@ -13200,7 +13199,7 @@ function Studio() {
         guide.y1 = y
         if (shift) { const a = Math.round(Math.atan2(y - g.y0, x - g.x0) / (Math.PI / 4)) * (Math.PI / 4), l = Math.hypot(x - g.x0, y - g.y0); guide.x1 = g.x0 + Math.cos(a) * l; guide.y1 = g.y0 + Math.sin(a) * l }
         break
-      case 'pick': S.setColor(g.alt ? 'bg' : 'fg', samplePixel(x, y)); break
+      case 'pick': S.setColor(g.alt ? 'bg' : 'fg', samplePixel(x, y, g.flat)); break
       case 'shape': {
         g.moved = true
         let w = x - g.x0, hh = y - g.y0
